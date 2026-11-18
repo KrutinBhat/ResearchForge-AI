@@ -1,0 +1,6 @@
+{
+  "name": "ResearchForge AI",
+  "description": "Research Intelligence, Verified Evidence, and Academic Integrity platform for project-grounded IEEE paper generation, multi-layer similarity analysis, citation verification, code-to-paper auditing, and academic manuscript refinement.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

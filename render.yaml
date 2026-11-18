@@ -1,0 +1,84 @@
+services:
+  - type: web
+    name: researchforge-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    region: singapore
+    healthCheckPath: /api/health
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: ENABLE_DEMO_WORKSPACE
+        value: "false"
+      - key: PORT
+        value: "8000"
+      - key: JWT_SECRET
+        generateValue: true
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: SQL_HOST
+        sync: false
+      - key: SQL_USER
+        sync: false
+      - key: SQL_PASSWORD
+        sync: false
+      - key: SQL_DB_NAME
+        sync: false
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: researchforge-redis
+          property: connectionString
+      - key: CELERY_BROKER_URL
+        fromService:
+          type: redis
+          name: researchforge-redis
+          property: connectionString
+      - key: CELERY_RESULT_BACKEND
+        fromService:
+          type: redis
+          name: researchforge-redis
+          property: connectionString
+
+  - type: worker
+    name: researchforge-worker
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerCommand: celery -A app.worker.celery_app worker --loglevel=info --concurrency=2
+    plan: starter
+    region: singapore
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: SQL_HOST
+        sync: false
+      - key: SQL_USER
+        sync: false
+      - key: SQL_PASSWORD
+        sync: false
+      - key: SQL_DB_NAME
+        sync: false
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: researchforge-redis
+          property: connectionString
+      - key: CELERY_BROKER_URL
+        fromService:
+          type: redis
+          name: researchforge-redis
+          property: connectionString
+      - key: CELERY_RESULT_BACKEND
+        fromService:
+          type: redis
+          name: researchforge-redis
+          property: connectionString
+
+  - type: redis
+    name: researchforge-redis
+    region: singapore
+    plan: free
+    ipAllowList: []
