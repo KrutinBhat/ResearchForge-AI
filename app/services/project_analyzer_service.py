@@ -6,7 +6,14 @@ import re
 import zipfile
 from typing import Any, Dict, List, Tuple
 
-from ..core.security import is_safe_archive_path, validate_file_signature, validate_public_github_url
+from ..core.security import (
+    is_safe_archive_path,
+    validate_file_signature,
+    validate_outbound_https_url,
+    validate_public_github_url,
+)
+
+ALLOWED_GITHUB_HOSTS = {"api.github.com", "raw.githubusercontent.com"}
 
 CODE_EXTENSIONS = {".py", ".ts", ".tsx", ".js", ".jsx", ".java", ".c", ".cpp", ".h", ".sql"}
 CONFIG_FILES = {"package.json", "requirements.txt", "pyproject.toml", "pom.xml", "cargo.toml", "go.mod"}
@@ -233,6 +240,7 @@ def extract_and_analyze_zip(zip_bytes: bytes, max_files: int = 450, max_uncompre
     extracted: List[Tuple[str, str]] = []
     skipped_unsafe: List[str] = []
     total_uncompressed = 0
+    max_ratio = 60
 
     with zipfile.ZipFile(io.BytesIO(zip_bytes), "r") as zf:
         infos = zf.infolist()[:max_files]
@@ -241,6 +249,9 @@ def extract_and_analyze_zip(zip_bytes: bytes, max_files: int = 450, max_uncompre
                 continue
             if not is_safe_archive_path(info.filename):
                 skipped_unsafe.append(info.filename)
+                continue
+            if info.compress_size > 0 and (info.file_size / info.compress_size) > max_ratio:
+                skipped_unsafe.append(f"{info.filename} (suspicious compression ratio)")
                 continue
             total_uncompressed += max(0, info.file_size)
             if total_uncompressed > max_uncompressed_bytes:
@@ -366,19 +377,25 @@ async def analyze_github_repository(repo_url: str) -> Dict[str, Any]:
     owner, repo = validate_public_github_url(repo_url)
     files: List[Tuple[str, str]] = []
     async with httpx.AsyncClient(timeout=12.0, headers={"User-Agent": "ResearchForgeAI/1.1"}) as client:
-        repo_resp = await client.get(f"https://api.github.com/repos/{owner}/{repo}")
+        repo_url_api = validate_outbound_https_url(f"https://api.github.com/repos/{owner}/{repo}", ALLOWED_GITHUB_HOSTS)
+        repo_resp = await client.get(repo_url_api)
         if repo_resp.status_code != 200:
             raise ValueError(f"GitHub repository lookup failed with status {repo_resp.status_code}")
         meta = repo_resp.json()
         branch = meta.get("default_branch", "main")
 
-        tree_resp = await client.get(f"https://api.github.com/repos/{owner}/{repo}/git/trees/{branch}?recursive=1")
+        tree_url_api = validate_outbound_https_url(
+            f"https://api.github.com/repos/{owner}/{repo}/git/trees/{branch}?recursive=1",
+            ALLOWED_GITHUB_HOSTS,
+        )
+        tree_resp = await client.get(tree_url_api)
         if tree_resp.status_code == 200:
             tree = tree_resp.json().get("tree", [])
             candidates = [
                 item["path"]
                 for item in tree
                 if item.get("type") == "blob"
+                and is_safe_archive_path(item["path"])
                 and (
                     posixpath.splitext(item["path"].lower())[1] in CODE_EXTENSIONS
                     or posixpath.basename(item["path"].lower()) in CONFIG_FILES
@@ -386,7 +403,11 @@ async def analyze_github_repository(repo_url: str) -> Dict[str, Any]:
                 )
             ][:35]
             for path in candidates:
-                raw_resp = await client.get(f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{path}")
+                raw_url = validate_outbound_https_url(
+                    f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{path}",
+                    ALLOWED_GITHUB_HOSTS,
+                )
+                raw_resp = await client.get(raw_url)
                 if raw_resp.status_code == 200 and len(raw_resp.text) <= MAX_READ_FILE_BYTES:
                     files.append((path, raw_resp.text))
 

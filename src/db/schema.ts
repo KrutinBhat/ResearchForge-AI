@@ -1,13 +1,31 @@
 import { relations } from 'drizzle-orm';
 import {
   boolean,
+  customType,
   doublePrecision,
+  index,
   integer,
   pgTable,
   text,
   timestamp,
   varchar,
 } from 'drizzle-orm/pg-core';
+
+export const vector384 = customType<{ data: number[] | null; driverData: string | null }>({
+  dataType() {
+    return 'vector(384)';
+  },
+  toDriver(value: number[] | null): string | null {
+    if (!value || value.length === 0) return null;
+    return `[${value.slice(0, 384).map((n) => (Number.isFinite(n) ? Number(n.toFixed(6)) : 0)).join(',')}]`;
+  },
+  fromDriver(value: string | null): number[] | null {
+    if (!value || typeof value !== 'string') return null;
+    const trimmed = value.replace(/^\[|\]$/g, '').trim();
+    if (!trimmed) return null;
+    return trimmed.split(',').map((v) => Number(v));
+  },
+});
 
 export const users = pgTable('users', {
   id: varchar('id', { length: 48 }).primaryKey(),
@@ -23,42 +41,50 @@ export const users = pgTable('users', {
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
-export const projects = pgTable('projects', {
-  id: varchar('id', { length: 48 }).primaryKey(),
-  userId: varchar('user_id', { length: 48 })
-    .notNull()
-    .references(() => users.id, { onDelete: 'cascade' }),
-  title: varchar('title', { length: 255 }).notNull(),
-  description: text('description').notNull().default(''),
-  domain: varchar('domain', { length: 128 }).notNull().default('Computer Science'),
-  sourceType: varchar('source_type', { length: 32 }).notNull().default('manual'),
-  sourceUrl: varchar('source_url', { length: 512 }).notNull().default(''),
-  status: varchar('status', { length: 32 }).notNull().default('analyzed'),
-  analysisJson: text('analysis_json').notNull().default('{}'),
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
-});
+export const projects = pgTable(
+  'projects',
+  {
+    id: varchar('id', { length: 48 }).primaryKey(),
+    userId: varchar('user_id', { length: 48 })
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    title: varchar('title', { length: 255 }).notNull(),
+    description: text('description').notNull().default(''),
+    domain: varchar('domain', { length: 128 }).notNull().default('Computer Science'),
+    sourceType: varchar('source_type', { length: 32 }).notNull().default('manual'),
+    sourceUrl: varchar('source_url', { length: 512 }).notNull().default(''),
+    status: varchar('status', { length: 32 }).notNull().default('analyzed'),
+    analysisJson: text('analysis_json').notNull().default('{}'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index('ix_projects_user_updated').on(table.userId, table.updatedAt)]
+);
 
-export const documents = pgTable('documents', {
-  id: varchar('id', { length: 48 }).primaryKey(),
-  userId: varchar('user_id', { length: 48 })
-    .notNull()
-    .references(() => users.id, { onDelete: 'cascade' }),
-  projectId: varchar('project_id', { length: 48 }).references(() => projects.id, {
-    onDelete: 'set null',
-  }),
-  title: varchar('title', { length: 255 }).notNull(),
-  format: varchar('format', { length: 16 }).notNull().default('ieee'),
-  citationStyle: varchar('citation_style', { length: 16 }).notNull().default('IEEE'),
-  rawText: text('raw_text').notNull().default(''),
-  sectionsJson: text('sections_json').notNull().default('[]'),
-  referencesJson: text('references_json').notNull().default('[]'),
-  metadataJson: text('metadata_json').notNull().default('{}'),
-  wordCount: integer('word_count').notNull().default(0),
-  status: varchar('status', { length: 32 }).notNull().default('draft'),
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
-});
+export const documents = pgTable(
+  'documents',
+  {
+    id: varchar('id', { length: 48 }).primaryKey(),
+    userId: varchar('user_id', { length: 48 })
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    projectId: varchar('project_id', { length: 48 }).references(() => projects.id, {
+      onDelete: 'set null',
+    }),
+    title: varchar('title', { length: 255 }).notNull(),
+    format: varchar('format', { length: 16 }).notNull().default('ieee'),
+    citationStyle: varchar('citation_style', { length: 16 }).notNull().default('IEEE'),
+    rawText: text('raw_text').notNull().default(''),
+    sectionsJson: text('sections_json').notNull().default('[]'),
+    referencesJson: text('references_json').notNull().default('[]'),
+    metadataJson: text('metadata_json').notNull().default('{}'),
+    wordCount: integer('word_count').notNull().default(0),
+    status: varchar('status', { length: 32 }).notNull().default('draft'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index('ix_documents_user_updated').on(table.userId, table.updatedAt)]
+);
 
 export const documentVersions = pgTable('document_versions', {
   id: varchar('id', { length: 48 }).primaryKey(),
@@ -72,63 +98,77 @@ export const documentVersions = pgTable('document_versions', {
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
-export const refinementJobs = pgTable('refinement_jobs', {
-  id: varchar('id', { length: 48 }).primaryKey(),
-  documentId: varchar('document_id', { length: 48 })
-    .notNull()
-    .references(() => documents.id, { onDelete: 'cascade' }),
-  userId: varchar('user_id', { length: 48 })
-    .notNull()
-    .references(() => users.id, { onDelete: 'cascade' }),
-  mode: varchar('mode', { length: 64 }).notNull(),
-  scope: varchar('scope', { length: 32 }).notNull().default('whole_paper'),
-  status: varchar('status', { length: 32 }).notNull().default('queued'),
-  progress: integer('progress').notNull().default(0),
-  originalSectionsJson: text('original_sections_json').notNull().default('[]'),
-  refinedSectionsJson: text('refined_sections_json').notNull().default('[]'),
-  metricsJson: text('metrics_json').notNull().default('{}'),
-  errorMessage: text('error_message').notNull().default(''),
-  retries: integer('retries').notNull().default(0),
-  cancelled: boolean('cancelled').notNull().default(false),
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-  completedAt: timestamp('completed_at', { withTimezone: true }),
-});
+export const refinementJobs = pgTable(
+  'refinement_jobs',
+  {
+    id: varchar('id', { length: 48 }).primaryKey(),
+    documentId: varchar('document_id', { length: 48 })
+      .notNull()
+      .references(() => documents.id, { onDelete: 'cascade' }),
+    userId: varchar('user_id', { length: 48 })
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    mode: varchar('mode', { length: 64 }).notNull(),
+    scope: varchar('scope', { length: 32 }).notNull().default('whole_paper'),
+    status: varchar('status', { length: 32 }).notNull().default('queued'),
+    progress: integer('progress').notNull().default(0),
+    payloadJson: text('payload_json').notNull().default('{}'),
+    originalSectionsJson: text('original_sections_json').notNull().default('[]'),
+    refinedSectionsJson: text('refined_sections_json').notNull().default('[]'),
+    metricsJson: text('metrics_json').notNull().default('{}'),
+    errorMessage: text('error_message').notNull().default(''),
+    retries: integer('retries').notNull().default(0),
+    cancelled: boolean('cancelled').notNull().default(false),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    completedAt: timestamp('completed_at', { withTimezone: true }),
+  },
+  (table) => [index('ix_refinement_jobs_user_created').on(table.userId, table.createdAt)]
+);
 
-export const analysisJobs = pgTable('analysis_jobs', {
-  id: varchar('id', { length: 48 }).primaryKey(),
-  userId: varchar('user_id', { length: 48 })
-    .notNull()
-    .references(() => users.id, { onDelete: 'cascade' }),
-  jobType: varchar('job_type', { length: 64 }).notNull(),
-  targetId: varchar('target_id', { length: 48 }),
-  status: varchar('status', { length: 32 }).notNull().default('queued'),
-  progress: integer('progress').notNull().default(0),
-  payloadJson: text('payload_json').notNull().default('{}'),
-  resultJson: text('result_json').notNull().default('{}'),
-  errorMessage: text('error_message').notNull().default(''),
-  retries: integer('retries').notNull().default(0),
-  cancelled: boolean('cancelled').notNull().default(false),
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
-  completedAt: timestamp('completed_at', { withTimezone: true }),
-});
+export const analysisJobs = pgTable(
+  'analysis_jobs',
+  {
+    id: varchar('id', { length: 48 }).primaryKey(),
+    userId: varchar('user_id', { length: 48 })
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    jobType: varchar('job_type', { length: 64 }).notNull(),
+    targetId: varchar('target_id', { length: 48 }),
+    status: varchar('status', { length: 32 }).notNull().default('queued'),
+    progress: integer('progress').notNull().default(0),
+    payloadJson: text('payload_json').notNull().default('{}'),
+    resultJson: text('result_json').notNull().default('{}'),
+    errorMessage: text('error_message').notNull().default(''),
+    retries: integer('retries').notNull().default(0),
+    cancelled: boolean('cancelled').notNull().default(false),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+    completedAt: timestamp('completed_at', { withTimezone: true }),
+  },
+  (table) => [index('ix_analysis_jobs_user_created').on(table.userId, table.createdAt)]
+);
 
-export const corpusChunks = pgTable('corpus_chunks', {
-  id: varchar('id', { length: 48 }).primaryKey(),
-  userId: varchar('user_id', { length: 48 }).references(() => users.id, { onDelete: 'cascade' }),
-  documentId: varchar('document_id', { length: 48 }).references(() => documents.id, {
-    onDelete: 'cascade',
-  }),
-  sourceType: varchar('source_type', { length: 32 }).notNull().default('workspace'),
-  title: varchar('title', { length: 512 }).notNull(),
-  authors: varchar('authors', { length: 512 }).notNull().default(''),
-  year: varchar('year', { length: 16 }).notNull().default(''),
-  url: varchar('url', { length: 512 }).notNull().default(''),
-  chunkIndex: integer('chunk_index').notNull().default(0),
-  content: text('content').notNull(),
-  embeddingJson: text('embedding_json').notNull().default('[]'),
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-});
+export const corpusChunks = pgTable(
+  'corpus_chunks',
+  {
+    id: varchar('id', { length: 48 }).primaryKey(),
+    userId: varchar('user_id', { length: 48 }).references(() => users.id, { onDelete: 'cascade' }),
+    documentId: varchar('document_id', { length: 48 }).references(() => documents.id, {
+      onDelete: 'cascade',
+    }),
+    sourceType: varchar('source_type', { length: 32 }).notNull().default('workspace'),
+    title: varchar('title', { length: 512 }).notNull(),
+    authors: varchar('authors', { length: 512 }).notNull().default(''),
+    year: varchar('year', { length: 16 }).notNull().default(''),
+    url: varchar('url', { length: 512 }).notNull().default(''),
+    chunkIndex: integer('chunk_index').notNull().default(0),
+    content: text('content').notNull(),
+    embeddingJson: text('embedding_json').notNull().default('[]'),
+    embedding: vector384('embedding'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index('ix_corpus_chunks_user_doc').on(table.userId, table.documentId)]
+);
 
 export const citations = pgTable('citations', {
   id: varchar('id', { length: 48 }).primaryKey(),
@@ -152,80 +192,104 @@ export const citations = pgTable('citations', {
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
-export const similarityReports = pgTable('similarity_reports', {
-  id: varchar('id', { length: 48 }).primaryKey(),
-  userId: varchar('user_id', { length: 48 })
-    .notNull()
-    .references(() => users.id, { onDelete: 'cascade' }),
-  documentId: varchar('document_id', { length: 48 }),
-  title: varchar('title', { length: 255 }).notNull(),
-  overallSimilarity: doublePrecision('overall_similarity').notNull().default(0),
-  corpusCoverage: text('corpus_coverage').notNull().default(''),
-  resultsJson: text('results_json').notNull().default('{}'),
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-});
+export const similarityReports = pgTable(
+  'similarity_reports',
+  {
+    id: varchar('id', { length: 48 }).primaryKey(),
+    userId: varchar('user_id', { length: 48 })
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    documentId: varchar('document_id', { length: 48 }),
+    title: varchar('title', { length: 255 }).notNull(),
+    overallSimilarity: doublePrecision('overall_similarity').notNull().default(0),
+    corpusCoverage: text('corpus_coverage').notNull().default(''),
+    resultsJson: text('results_json').notNull().default('{}'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index('ix_similarity_user_created').on(table.userId, table.createdAt)]
+);
 
-export const writingAnalyses = pgTable('writing_analyses', {
-  id: varchar('id', { length: 48 }).primaryKey(),
-  userId: varchar('user_id', { length: 48 })
-    .notNull()
-    .references(() => users.id, { onDelete: 'cascade' }),
-  documentId: varchar('document_id', { length: 48 }),
-  title: varchar('title', { length: 255 }).notNull(),
-  metricsJson: text('metrics_json').notNull().default('{}'),
-  observationsJson: text('observations_json').notNull().default('[]'),
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-});
+export const writingAnalyses = pgTable(
+  'writing_analyses',
+  {
+    id: varchar('id', { length: 48 }).primaryKey(),
+    userId: varchar('user_id', { length: 48 })
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    documentId: varchar('document_id', { length: 48 }),
+    title: varchar('title', { length: 255 }).notNull(),
+    metricsJson: text('metrics_json').notNull().default('{}'),
+    observationsJson: text('observations_json').notNull().default('[]'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index('ix_writing_user_created').on(table.userId, table.createdAt)]
+);
 
-export const citationChecks = pgTable('citation_checks', {
-  id: varchar('id', { length: 48 }).primaryKey(),
-  userId: varchar('user_id', { length: 48 })
-    .notNull()
-    .references(() => users.id, { onDelete: 'cascade' }),
-  documentId: varchar('document_id', { length: 48 }),
-  title: varchar('title', { length: 255 }).notNull(),
-  citationsJson: text('citations_json').notNull().default('[]'),
-  summaryJson: text('summary_json').notNull().default('{}'),
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-});
+export const citationChecks = pgTable(
+  'citation_checks',
+  {
+    id: varchar('id', { length: 48 }).primaryKey(),
+    userId: varchar('user_id', { length: 48 })
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    documentId: varchar('document_id', { length: 48 }),
+    title: varchar('title', { length: 255 }).notNull(),
+    citationsJson: text('citations_json').notNull().default('[]'),
+    summaryJson: text('summary_json').notNull().default('{}'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index('ix_citation_checks_user_created').on(table.userId, table.createdAt)]
+);
 
-export const qualityEvaluations = pgTable('quality_evaluations', {
-  id: varchar('id', { length: 48 }).primaryKey(),
-  userId: varchar('user_id', { length: 48 })
-    .notNull()
-    .references(() => users.id, { onDelete: 'cascade' }),
-  documentId: varchar('document_id', { length: 48 }),
-  title: varchar('title', { length: 255 }).notNull(),
-  dimensionsJson: text('dimensions_json').notNull().default('[]'),
-  recommendationsJson: text('recommendations_json').notNull().default('[]'),
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-});
+export const qualityEvaluations = pgTable(
+  'quality_evaluations',
+  {
+    id: varchar('id', { length: 48 }).primaryKey(),
+    userId: varchar('user_id', { length: 48 })
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    documentId: varchar('document_id', { length: 48 }),
+    title: varchar('title', { length: 255 }).notNull(),
+    dimensionsJson: text('dimensions_json').notNull().default('[]'),
+    recommendationsJson: text('recommendations_json').notNull().default('[]'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index('ix_quality_user_created').on(table.userId, table.createdAt)]
+);
 
-export const integrityAudits = pgTable('integrity_audits', {
-  id: varchar('id', { length: 48 }).primaryKey(),
-  userId: varchar('user_id', { length: 48 })
-    .notNull()
-    .references(() => users.id, { onDelete: 'cascade' }),
-  projectId: varchar('project_id', { length: 48 }),
-  documentId: varchar('document_id', { length: 48 }),
-  title: varchar('title', { length: 255 }).notNull(),
-  overallStatus: varchar('overall_status', { length: 32 }).notNull().default('Needs review'),
-  findingsJson: text('findings_json').notNull().default('[]'),
-  summaryJson: text('summary_json').notNull().default('{}'),
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-});
+export const integrityAudits = pgTable(
+  'integrity_audits',
+  {
+    id: varchar('id', { length: 48 }).primaryKey(),
+    userId: varchar('user_id', { length: 48 })
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    projectId: varchar('project_id', { length: 48 }),
+    documentId: varchar('document_id', { length: 48 }),
+    title: varchar('title', { length: 255 }).notNull(),
+    overallStatus: varchar('overall_status', { length: 32 }).notNull().default('Needs review'),
+    findingsJson: text('findings_json').notNull().default('[]'),
+    summaryJson: text('summary_json').notNull().default('{}'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index('ix_audits_user_created').on(table.userId, table.createdAt)]
+);
 
-export const activityLogs = pgTable('activity_logs', {
-  id: varchar('id', { length: 48 }).primaryKey(),
-  userId: varchar('user_id', { length: 48 })
-    .notNull()
-    .references(() => users.id, { onDelete: 'cascade' }),
-  module: varchar('module', { length: 64 }).notNull(),
-  action: varchar('action', { length: 255 }).notNull(),
-  entityTitle: varchar('entity_title', { length: 255 }).notNull(),
-  status: varchar('status', { length: 32 }).notNull().default('Completed'),
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-});
+export const activityLogs = pgTable(
+  'activity_logs',
+  {
+    id: varchar('id', { length: 48 }).primaryKey(),
+    userId: varchar('user_id', { length: 48 })
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    module: varchar('module', { length: 64 }).notNull(),
+    action: varchar('action', { length: 255 }).notNull(),
+    entityTitle: varchar('entity_title', { length: 255 }).notNull(),
+    status: varchar('status', { length: 32 }).notNull().default('Completed'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index('ix_activity_user_created').on(table.userId, table.createdAt)]
+);
 
 export const usersRelations = relations(users, ({ many }) => ({
   projects: many(projects),

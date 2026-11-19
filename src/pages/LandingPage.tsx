@@ -303,7 +303,7 @@ export function LandingPage() {
             </h3>
             <p className="text-sm text-slate-600 leading-relaxed">
               Core IR, stylometric, citation registry, static AST, and structural refinement engines run locally with
-              SQLite persistence, paired with optional server-side Gemini synthesis.
+              PostgreSQL &amp; pgvector persistence, paired with optional server-side Gemini synthesis.
             </p>
           </div>
         </div>

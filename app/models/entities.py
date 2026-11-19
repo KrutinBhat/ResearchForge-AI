@@ -1,8 +1,10 @@
+import json
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.types import TypeDecorator
 from ..core.database import Base
 
 
@@ -12,6 +14,40 @@ def utcnow() -> datetime:
 
 def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:12]}"
+
+
+class VectorEmbeddingType(TypeDecorator):
+    """Stores native pgvector vector(384) on PostgreSQL and JSON array text in SQLite unit tests."""
+
+    impl = Text
+    cache_ok = True
+
+    def load_dialect_impl(self, dialect):
+        if dialect.name == "postgresql":
+            try:
+                from pgvector.sqlalchemy import Vector
+
+                return dialect.type_descriptor(Vector(384))
+            except Exception:
+                return dialect.type_descriptor(Text())
+        return dialect.type_descriptor(Text())
+
+    def process_bind_param(self, value, dialect):
+        if value is None:
+            return None
+        if dialect.name == "postgresql":
+            return [float(x) for x in value[:384]]
+        return json.dumps([float(x) for x in value[:384]])
+
+    def process_result_value(self, value, dialect):
+        if value is None:
+            return None
+        if isinstance(value, str):
+            try:
+                return [float(x) for x in json.loads(value)]
+            except Exception:
+                return None
+        return [float(x) for x in value]
 
 
 class User(Base):
@@ -35,6 +71,7 @@ class User(Base):
 
 class Project(Base):
     __tablename__ = "projects"
+    __table_args__ = (Index("ix_projects_user_updated", "user_id", "updated_at"),)
 
     id: Mapped[str] = mapped_column(String(48), primary_key=True, default=lambda: new_id("proj"))
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
@@ -53,6 +90,7 @@ class Project(Base):
 
 class Document(Base):
     __tablename__ = "documents"
+    __table_args__ = (Index("ix_documents_user_updated", "user_id", "updated_at"),)
 
     id: Mapped[str] = mapped_column(String(48), primary_key=True, default=lambda: new_id("doc"))
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
@@ -89,6 +127,7 @@ class DocumentVersion(Base):
 
 class RefinementJob(Base):
     __tablename__ = "refinement_jobs"
+    __table_args__ = (Index("ix_refinement_jobs_user_created", "user_id", "created_at"),)
 
     id: Mapped[str] = mapped_column(String(48), primary_key=True, default=lambda: new_id("refjob"))
     document_id: Mapped[str] = mapped_column(ForeignKey("documents.id", ondelete="CASCADE"), index=True, nullable=False)
@@ -97,6 +136,7 @@ class RefinementJob(Base):
     scope: Mapped[str] = mapped_column(String(32), default="whole_paper", nullable=False)
     status: Mapped[str] = mapped_column(String(32), default="queued", nullable=False)
     progress: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    payload_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
     original_sections_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
     refined_sections_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
     metrics_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
@@ -109,6 +149,7 @@ class RefinementJob(Base):
 
 class AnalysisJob(Base):
     __tablename__ = "analysis_jobs"
+    __table_args__ = (Index("ix_analysis_jobs_user_created", "user_id", "created_at"),)
 
     id: Mapped[str] = mapped_column(String(48), primary_key=True, default=lambda: new_id("job"))
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
@@ -128,6 +169,7 @@ class AnalysisJob(Base):
 
 class CorpusChunk(Base):
     __tablename__ = "corpus_chunks"
+    __table_args__ = (Index("ix_corpus_chunks_user_doc", "user_id", "document_id"),)
 
     id: Mapped[str] = mapped_column(String(48), primary_key=True, default=lambda: new_id("chk"))
     user_id: Mapped[Optional[str]] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=True)
@@ -140,6 +182,7 @@ class CorpusChunk(Base):
     chunk_index: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     embedding_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
+    embedding: Mapped[Optional[list[float]]] = mapped_column(VectorEmbeddingType(), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
 
@@ -165,6 +208,7 @@ class Citation(Base):
 
 class SimilarityReport(Base):
     __tablename__ = "similarity_reports"
+    __table_args__ = (Index("ix_similarity_user_created", "user_id", "created_at"),)
 
     id: Mapped[str] = mapped_column(String(48), primary_key=True, default=lambda: new_id("sim"))
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
@@ -178,6 +222,7 @@ class SimilarityReport(Base):
 
 class WritingAnalysis(Base):
     __tablename__ = "writing_analyses"
+    __table_args__ = (Index("ix_writing_user_created", "user_id", "created_at"),)
 
     id: Mapped[str] = mapped_column(String(48), primary_key=True, default=lambda: new_id("wrt"))
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
@@ -190,6 +235,7 @@ class WritingAnalysis(Base):
 
 class CitationCheck(Base):
     __tablename__ = "citation_checks"
+    __table_args__ = (Index("ix_citation_checks_user_created", "user_id", "created_at"),)
 
     id: Mapped[str] = mapped_column(String(48), primary_key=True, default=lambda: new_id("cit"))
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
@@ -202,6 +248,7 @@ class CitationCheck(Base):
 
 class QualityEvaluation(Base):
     __tablename__ = "quality_evaluations"
+    __table_args__ = (Index("ix_quality_user_created", "user_id", "created_at"),)
 
     id: Mapped[str] = mapped_column(String(48), primary_key=True, default=lambda: new_id("qual"))
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
@@ -214,6 +261,7 @@ class QualityEvaluation(Base):
 
 class IntegrityAudit(Base):
     __tablename__ = "integrity_audits"
+    __table_args__ = (Index("ix_audits_user_created", "user_id", "created_at"),)
 
     id: Mapped[str] = mapped_column(String(48), primary_key=True, default=lambda: new_id("aud"))
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
@@ -228,6 +276,7 @@ class IntegrityAudit(Base):
 
 class ActivityLog(Base):
     __tablename__ = "activity_logs"
+    __table_args__ = (Index("ix_activity_user_created", "user_id", "created_at"),)
 
     id: Mapped[str] = mapped_column(String(48), primary_key=True, default=lambda: new_id("act"))
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)

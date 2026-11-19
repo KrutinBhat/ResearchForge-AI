@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { Save, Download, Plus, Sparkles, History } from 'lucide-react';
+import { Save, Download, Plus, Sparkles, History, Undo2, FileCode2, Copy, Check, X } from 'lucide-react';
 import { WorkspaceLayout } from '../components/WorkspaceLayout';
 import { apiDownload, apiFetch } from '../lib/api';
 
@@ -34,11 +34,22 @@ export function WritingStudioPage() {
   const [activeDoc, setActiveDoc] = useState<DocumentDetail | null>(null);
   const [versions, setVersions] = useState<VersionEntry[]>([]);
   const [activeSecIdx, setActiveSecIdx] = useState(0);
+  const [undoStack, setUndoStack] = useState<Section[][]>([]);
   const [newRef, setNewRef] = useState('');
   const [newSectionTitle, setNewSectionTitle] = useState('');
   const [saving, setSaving] = useState(false);
   const [statusMsg, setStatusMsg] = useState('');
   const [error, setError] = useState('');
+  const [showBibDrawer, setShowBibDrawer] = useState(false);
+  const [includeUnverifiedBib, setIncludeUnverifiedBib] = useState(false);
+  const [bibLoading, setBibLoading] = useState(false);
+  const [bibCopied, setBibCopied] = useState(false);
+  const [bibPreview, setBibPreview] = useState<{
+    bibtex: string;
+    includedCount: number;
+    skippedCount: number;
+    validation: { valid: boolean; entryCount: number; errors: string[] };
+  } | null>(null);
 
   const loadList = async () => {
     const res = await apiFetch<{ documents: Array<{ id: string; title: string }> }>('/api/documents');
@@ -54,6 +65,7 @@ export function WritingStudioPage() {
       const res = await apiFetch<{ document: DocumentDetail; versions: VersionEntry[] }>(`/api/documents/${id}`);
       setActiveDoc(res.document);
       setVersions(res.versions);
+      setUndoStack([]);
       setActiveSecIdx(0);
       setSearchParams({ doc: id }, { replace: true });
     } catch (e: any) {
@@ -65,8 +77,23 @@ export function WritingStudioPage() {
     loadList().catch((e) => setError(e.message));
   }, []);
 
+  const pushUndoSnapshot = (sections: Section[]) => {
+    const copy = sections.map((s) => ({ ...s }));
+    setUndoStack((prev) => [...prev.slice(-24), copy]);
+  };
+
+  const handleUndo = () => {
+    if (!activeDoc || undoStack.length === 0) return;
+    const prevSections = undoStack[undoStack.length - 1];
+    setUndoStack((prev) => prev.slice(0, -1));
+    setActiveDoc({ ...activeDoc, sections: prevSections });
+    setActiveSecIdx((idx) => Math.min(idx, Math.max(0, prevSections.length - 1)));
+    setStatusMsg('Reverted last section edit.');
+  };
+
   const handleSectionChange = (idx: number, field: 'heading' | 'content', val: string) => {
     if (!activeDoc) return;
+    pushUndoSnapshot(activeDoc.sections);
     const next = [...activeDoc.sections];
     next[idx] = { ...next[idx], [field]: val };
     setActiveDoc({ ...activeDoc, sections: next });
@@ -74,6 +101,7 @@ export function WritingStudioPage() {
 
   const handleAddSection = () => {
     if (!activeDoc || !newSectionTitle.trim()) return;
+    pushUndoSnapshot(activeDoc.sections);
     const next = [
       ...activeDoc.sections,
       { id: `sec_${Date.now()}`, heading: newSectionTitle.trim(), content: '' },
@@ -130,13 +158,43 @@ export function WritingStudioPage() {
     }
   };
 
-  const handleExport = async (fmt: 'docx' | 'pdf' | 'tex' | 'md') => {
+  const handleExport = async (fmt: 'docx' | 'pdf' | 'tex' | 'md' | 'bib') => {
     if (!activeDoc) return;
     try {
-      await apiDownload(`/api/documents/${activeDoc.id}/export?format=${fmt}`, `manuscript.${fmt}`);
+      const qs = fmt === 'bib' ? `&includeUnverified=${includeUnverifiedBib}` : '';
+      await apiDownload(`/api/documents/${activeDoc.id}/export?format=${fmt}${qs}`, `manuscript.${fmt}`);
     } catch (e: any) {
       setError(e.message);
     }
+  };
+
+  useEffect(() => {
+    if (!showBibDrawer || !activeDoc) return;
+    let cancelled = false;
+    setBibLoading(true);
+    apiFetch('/api/citations/export-bibtex', {
+      method: 'POST',
+      body: JSON.stringify({ documentId: activeDoc.id, includeUnverified: includeUnverifiedBib }),
+    })
+      .then((res) => {
+        if (!cancelled) setBibPreview(res);
+      })
+      .catch((e: any) => {
+        if (!cancelled) setError(e.message);
+      })
+      .finally(() => {
+        if (!cancelled) setBibLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [showBibDrawer, activeDoc?.id, includeUnverifiedBib]);
+
+  const handleCopyBib = () => {
+    if (!bibPreview?.bibtex) return;
+    navigator.clipboard?.writeText(bibPreview.bibtex);
+    setBibCopied(true);
+    setTimeout(() => setBibCopied(false), 1800);
   };
 
   const currentSection = activeDoc?.sections[activeSecIdx];
@@ -229,9 +287,94 @@ export function WritingStudioPage() {
             >
               <span>LaTeX</span>
             </button>
+            <button
+              type="button"
+              onClick={() => setShowBibDrawer((v) => !v)}
+              className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border ${
+                showBibDrawer
+                  ? 'bg-blue-50 border-blue-300 text-blue-900'
+                  : 'text-slate-700 bg-slate-50 border-slate-300 hover:bg-slate-100'
+              }`}
+            >
+              <FileCode2 className="w-3.5 h-3.5" aria-hidden="true" />
+              <span>BibTeX</span>
+            </button>
           </div>
         )}
       </div>
+
+      {activeDoc && showBibDrawer && (
+        <section
+          aria-label="Manuscript BibTeX Exporter"
+          className="bg-white border border-slate-200 rounded-xl p-5 mb-6 space-y-3"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h2 className="font-display text-sm font-semibold text-slate-900">
+                BibTeX Reference Export — {activeDoc.title}
+              </h2>
+              <p className="text-xs text-slate-600 mt-0.5">
+                Exports verified bibliography records by default. Unverified items are skipped unless included below with notice comments.
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={handleCopyBib}
+                disabled={!bibPreview || bibPreview.includedCount === 0}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-700 bg-slate-50 border border-slate-300 rounded-lg hover:bg-slate-100 disabled:opacity-50"
+              >
+                {bibCopied ? <Check className="w-3.5 h-3.5 text-emerald-700" /> : <Copy className="w-3.5 h-3.5" />}
+                <span>{bibCopied ? 'Copied' : 'Copy BibTeX'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => handleExport('bib')}
+                disabled={!bibPreview || bibPreview.includedCount === 0}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-slate-900 rounded-lg hover:bg-slate-800 disabled:opacity-50"
+              >
+                <Download className="w-3.5 h-3.5" aria-hidden="true" />
+                <span>Download .bib</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowBibDrawer(false)}
+                aria-label="Close BibTeX panel"
+                className="p-1.5 text-slate-500 hover:text-slate-900"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-slate-100 text-xs">
+            <label className="inline-flex items-center gap-2 font-medium text-slate-700 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={includeUnverifiedBib}
+                onChange={(e) => setIncludeUnverifiedBib(e.target.checked)}
+                className="rounded border-slate-300 text-blue-800"
+              />
+              <span>Include unverified & incomplete entries (annotated)</span>
+            </label>
+            {bibPreview && (
+              <div className="font-mono text-slate-600 tabular-nums">
+                {bibLoading
+                  ? 'Building BibTeX...'
+                  : `${bibPreview.includedCount} included · ${bibPreview.skippedCount} skipped · ${
+                      bibPreview.validation.valid ? 'Syntax valid' : bibPreview.validation.errors[0]
+                    }`}
+              </div>
+            )}
+          </div>
+
+          {bibPreview && (
+            <pre className="p-3.5 bg-slate-950 text-slate-100 rounded-lg text-xs font-mono overflow-x-auto max-h-56 leading-relaxed">
+              {bibPreview.bibtex}
+            </pre>
+          )}
+        </section>
+      )}
 
       {activeDoc ? (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
@@ -289,7 +432,10 @@ export function WritingStudioPage() {
                     </div>
                     <button
                       type="button"
-                      onClick={() => setActiveDoc({ ...activeDoc, sections: v.sections })}
+                      onClick={() => {
+                        pushUndoSnapshot(activeDoc.sections);
+                        setActiveDoc({ ...activeDoc, sections: v.sections });
+                      }}
                       className="text-blue-800 hover:underline mt-1"
                     >
                       Load into editor
@@ -317,14 +463,23 @@ export function WritingStudioPage() {
 
             {currentSection && (
               <div className="space-y-3">
-                <div className="flex items-center justify-between gap-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
                   <input
                     aria-label="Section heading"
                     type="text"
                     value={currentSection.heading}
                     onChange={(e) => handleSectionChange(activeSecIdx, 'heading', e.target.value)}
-                    className="font-display text-sm font-semibold text-slate-900 border border-slate-200 rounded-lg px-3 py-1.5 flex-1"
+                    className="font-display text-sm font-semibold text-slate-900 border border-slate-200 rounded-lg px-3 py-1.5 flex-1 min-w-[180px]"
                   />
+                  <button
+                    type="button"
+                    onClick={handleUndo}
+                    disabled={undoStack.length === 0}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-700 bg-slate-50 border border-slate-300 rounded-lg hover:bg-slate-100 disabled:opacity-40 whitespace-nowrap"
+                  >
+                    <Undo2 className="w-3.5 h-3.5" aria-hidden="true" />
+                    <span>Undo Edit</span>
+                  </button>
                   <button
                     type="button"
                     onClick={handleToneCleanup}

@@ -9,15 +9,35 @@ export function newId(prefix: string): string {
 
 export async function getOrCreateFirebaseUser(uid: string, email: string, name?: string) {
   try {
-    const cleanEmail = (email || `${uid}@firebase.local`).toLowerCase();
+    const cleanEmail = (email || `${uid}@firebase.local`).toLowerCase().trim();
     const displayName = (name || cleanEmail.split('@')[0] || 'Researcher').trim();
+
+    const existingByUid = await db.select().from(users).where(eq(users.uid, uid)).limit(1);
+    if (existingByUid.length > 0) {
+      if (existingByUid[0].authProvider === 'demo') {
+        throw new Error('Cannot link Firebase credentials to isolated demo workspace.');
+      }
+      if (existingByUid[0].email !== cleanEmail || existingByUid[0].name !== displayName) {
+        const updated = await db
+          .update(users)
+          .set({ email: cleanEmail, name: displayName, authProvider: 'firebase' })
+          .where(eq(users.id, existingByUid[0].id))
+          .returning();
+        return updated[0];
+      }
+      return existingByUid[0];
+    }
+
     const existingByEmail = await db
       .select()
       .from(users)
       .where(eq(users.email, cleanEmail))
       .limit(1);
 
-    if (existingByEmail.length > 0 && existingByEmail[0].uid !== uid) {
+    if (existingByEmail.length > 0) {
+      if (existingByEmail[0].authProvider === 'demo') {
+        throw new Error('Cannot link Firebase credentials to isolated demo workspace.');
+      }
       const updated = await db
         .update(users)
         .set({ uid, authProvider: 'firebase' })
@@ -40,20 +60,12 @@ export async function getOrCreateFirebaseUser(uid: string, email: string, name?:
         consentAnalytics: false,
         consentRetention: true,
       })
-      .onConflictDoUpdate({
-        target: users.uid,
-        set: {
-          email: cleanEmail,
-          name: displayName,
-          authProvider: 'firebase',
-        },
-      })
       .returning();
 
     return result[0];
   } catch (error) {
     console.error('Database query failed in getOrCreateFirebaseUser:', error);
-    throw new Error('Failed to synchronize researcher profile.', { cause: error });
+    throw error instanceof Error ? error : new Error('Failed to synchronize researcher profile.');
   }
 }
 

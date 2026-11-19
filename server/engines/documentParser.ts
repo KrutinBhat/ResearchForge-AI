@@ -18,10 +18,38 @@ export interface ParsedDocument {
   figuresFound: string[];
   wordCount: number;
   ocrRequired: boolean;
+  pageCount?: number;
+  scannedPagesDetected?: number[];
+  isMixedPdf?: boolean;
   warnings: string[];
 }
 
-const SUPPORTED_EXTENSIONS = new Set(['pdf', 'docx', 'doc', 'txt', 'md', 'rtf', 'tex']);
+const SUPPORTED_EXTENSIONS = new Set(['pdf', 'docx', 'doc', 'txt', 'md', 'rtf', 'tex', 'bib']);
+export const MIN_DIGITAL_CHARS_PER_PAGE = 50;
+export const MAX_OCR_PAGES = 30;
+
+export function evaluatePdfPageOcrPlan(
+  pageCharCounts: number[],
+  threshold = MIN_DIGITAL_CHARS_PER_PAGE,
+  maxOcrPages = MAX_OCR_PAGES
+) {
+  const scannedPagesDetected: number[] = [];
+  pageCharCounts.forEach((len, idx) => {
+    if (len < threshold) scannedPagesDetected.push(idx + 1);
+  });
+  const pagesToOcr = scannedPagesDetected.slice(0, maxOcrPages);
+  const skippedPagesDueToLimit = scannedPagesDetected.slice(maxOcrPages);
+  const digitalPageCount = pageCharCounts.length - scannedPagesDetected.length;
+  return {
+    scannedPagesDetected,
+    pagesToOcr,
+    skippedPagesDueToLimit,
+    digitalPageCount,
+    isMixedPdf: digitalPageCount > 0 && scannedPagesDetected.length > 0,
+    thresholdChars: threshold,
+    pageLimitApplied: maxOcrPages,
+  };
+}
 
 const MAGIC_SIGNATURES: Record<string, Buffer[]> = {
   pdf: [Buffer.from('%PDF-')],
@@ -56,7 +84,7 @@ export function validateFileSignature(buffer: Buffer, filename: string, expected
     }
     return ext;
   }
-  if (['txt', 'md', 'tex', 'csv', 'json'].includes(ext)) {
+  if (['txt', 'md', 'tex', 'bib', 'csv', 'json'].includes(ext)) {
     const sample = buffer.subarray(0, Math.min(4096, buffer.length));
     if (sample.includes(0)) {
       throw new Error(`Binary null bytes detected inside text .${ext} file.`);
@@ -74,6 +102,7 @@ export function detectFormat(filename: string, mimeType?: string): string {
   if (mimeType?.includes('msword')) return 'doc';
   if (mimeType?.includes('rtf')) return 'rtf';
   if (mimeType?.includes('x-tex')) return 'tex';
+  if (mimeType?.includes('bibtex')) return 'bib';
   return 'txt';
 }
 
@@ -256,11 +285,22 @@ export async function parseDocumentBuffer(
   const warnings: string[] = [];
   let rawText = '';
   let ocrRequired = false;
+  let pageCount = 0;
+  let scannedPagesDetected: number[] = [];
+  let isMixedPdf = false;
 
   if (format === 'pdf') {
+    let pageTexts: string[] = [];
     try {
-      const result = await extractPdfText(new Uint8Array(buffer), { mergePages: true });
-      rawText = (result.text ?? '').trim();
+      const result = await extractPdfText(new Uint8Array(buffer), { mergePages: false });
+      const rawResult = result.text;
+      if (Array.isArray(rawResult)) {
+        pageTexts = rawResult.map((p) => String(p ?? '').trim());
+      } else {
+        pageTexts = [String(rawResult ?? '').trim()];
+      }
+      pageCount = pageTexts.length;
+      rawText = pageTexts.filter(Boolean).join('\n\n').trim();
     } catch (err: any) {
       const msg = String(err?.message || '').toLowerCase();
       if (msg.includes('password') || msg.includes('encrypt')) {
@@ -268,10 +308,20 @@ export async function parseDocumentBuffer(
       }
       throw new Error(`Unable to parse PDF file: ${err?.message || 'corrupted structure'}`);
     }
-    if (rawText.length < 40) {
+    const plan = evaluatePdfPageOcrPlan(pageTexts.map((t) => t.length));
+    scannedPagesDetected = plan.scannedPagesDetected;
+    isMixedPdf = plan.isMixedPdf;
+    if (scannedPagesDetected.length > 0) {
       ocrRequired = true;
+      const previewPages = scannedPagesDetected.slice(0, 10).join(', ') + (scannedPagesDetected.length > 10 ? ', ...' : '');
+      const capNotice =
+        plan.skippedPagesDueToLimit.length > 0
+          ? ` (OCR worker caps scans at ${MAX_OCR_PAGES} pages per PDF).`
+          : '.';
       warnings.push(
-        'PDF contains little or no selectable text layer (likely scanned). Native Tesseract OCR runs in the Python worker container; upload selectable text or DOCX for instant extraction.'
+        isMixedPdf
+          ? `Mixed digital + scanned PDF detected: ${scannedPagesDetected.length} sparse/scanned page(s) [<${MIN_DIGITAL_CHARS_PER_PAGE} chars] (page ${previewPages}). Native Tesseract OCR runs in the FastAPI/Celery container${capNotice}`
+          : `Scanned PDF detected across ${scannedPagesDetected.length} page(s) [<${MIN_DIGITAL_CHARS_PER_PAGE} chars]. Native Tesseract OCR runs in the FastAPI/Celery container${capNotice}`
       );
     }
   } else if (format === 'docx') {
@@ -292,7 +342,13 @@ export async function parseDocumentBuffer(
     rawText = buffer.toString('utf8').trim();
   }
 
-  return parseRawText(rawText, format, ocrRequired, warnings);
+  const parsed = parseRawText(rawText, format, ocrRequired, warnings);
+  if (format === 'pdf') {
+    parsed.pageCount = pageCount;
+    parsed.scannedPagesDetected = scannedPagesDetected;
+    parsed.isMixedPdf = isMixedPdf;
+  }
+  return parsed;
 }
 
 export function parseRawText(

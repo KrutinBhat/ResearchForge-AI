@@ -2,12 +2,11 @@ import express, { NextFunction, Request, Response } from 'express';
 import multer from 'multer';
 import bcrypt from 'bcryptjs';
 import { and, desc, eq, ne, sql } from 'drizzle-orm';
-import { db } from '../src/db/index.ts';
+import { db, pool } from '../src/db/index.ts';
 import { newId, getOrCreateFirebaseUser } from '../src/db/users.ts';
 import {
   citationChecks,
   citations as citationsTable,
-  corpusChunks,
   documents,
   documentVersions,
   integrityAudits,
@@ -24,8 +23,15 @@ import {
   getUserDashboardData,
   indexDocumentChunks,
   logActivity,
+  queryPgvectorSimilarChunks,
 } from '../src/db/queries.ts';
-import { AuthRequest, requireAuth, signSessionToken } from '../src/middleware/auth.ts';
+import {
+  AuthRequest,
+  isDemoAllowed,
+  requireAuth,
+  signSessionToken,
+  validateFirebaseDecodedClaims,
+} from '../src/middleware/auth.ts';
 import { adminAuth } from '../src/lib/firebase-admin.ts';
 import { parseDocumentBuffer, parseRawText, ParsedSection } from './engines/documentParser.ts';
 import {
@@ -35,7 +41,12 @@ import {
   fetchArxivRelatedAbstracts,
 } from './engines/similarityEngine.ts';
 import { analyzeWritingPatterns } from './engines/writingAnalyzer.ts';
-import { checkClaimToSourceRelevance, verifyBibliography } from './engines/citationEngine.ts';
+import {
+  checkClaimToSourceRelevance,
+  exportBibtexCollection,
+  verifyBibliography,
+  verifyBibtexEntries,
+} from './engines/citationEngine.ts';
 import {
   analyzeGithubRepository,
   analyzeZipArchive,
@@ -72,11 +83,25 @@ function rateLimit(req: Request, res: Response, next: NextFunction) {
   return next();
 }
 
-function isDemoEnabled(): boolean {
-  if (process.env.NODE_ENV === 'production') {
-    return process.env.DEMO_MODE_ENABLED === 'true';
+const authRateWindows = new Map<string, { count: number; resetAt: number }>();
+function authRateLimit(req: Request, res: Response, next: NextFunction) {
+  const ip = req.ip || 'local';
+  const now = Date.now();
+  const limit = Number(process.env.AUTH_RATE_LIMIT_PER_MINUTE || 30);
+  const entry = authRateWindows.get(ip);
+  if (!entry || now > entry.resetAt) {
+    authRateWindows.set(ip, { count: 1, resetAt: now + 60_000 });
+    return next();
   }
-  return process.env.DEMO_MODE_ENABLED !== 'false';
+  entry.count++;
+  if (entry.count > limit) {
+    return res.status(429).json({ error: 'Authentication rate limit exceeded. Try again in a minute.' });
+  }
+  return next();
+}
+
+function isDemoEnabled(): boolean {
+  return isDemoAllowed();
 }
 
 function executeRefinementJobInBackground(
@@ -209,7 +234,7 @@ export function createApiRouter() {
       status: 'ok',
       version: '1.1.0',
       canonicalBackend: 'python-fastapi',
-      activeRuntime: process.env.FASTAPI_URL ? 'fastapi-proxy' : 'node-cloudsql-adapter',
+      activeRuntime: /^https?:\/\//i.test(process.env.FASTAPI_URL || '') ? 'fastapi-proxy' : 'node-cloudsql-adapter',
       database: 'cloud-sql-postgresql',
       firebaseEnabled: true,
       demoEnabled: isDemoEnabled(),
@@ -224,6 +249,23 @@ export function createApiRouter() {
         'audit-6pillar',
         'export-ieee-2col-docx-pdf',
       ],
+    });
+  });
+
+  router.get('/ready', async (_req, res) => {
+    let dbOk = false;
+    try {
+      await pool.query('SELECT 1');
+      dbOk = true;
+    } catch {
+      dbOk = false;
+    }
+    return res.status(dbOk ? 200 : 503).json({
+      ready: dbOk,
+      checks: {
+        database: dbOk ? 'ok' : 'unavailable',
+        demoEnabled: isDemoEnabled(),
+      },
     });
   });
 
@@ -249,6 +291,8 @@ export function createApiRouter() {
         '/api/similarity/analyze': { post: { summary: 'Multi-layer similarity with paraphrase & chunk support' } },
         '/api/writing-analysis/analyze': { post: { summary: 'Stylometrics + leave-one-topic-out evaluation' } },
         '/api/citations/verify': { post: { summary: '6-state citation audit across 4 registries' } },
+        '/api/citations/verify-bibtex': { post: { summary: 'Parse & cross-reference BibTeX entries against Crossref & scholarly registries' } },
+        '/api/citations/export-bibtex': { post: { summary: 'Verified-only default BibTeX exporter with syntax validation' } },
         '/api/research-quality/evaluate': { post: { summary: '13-dimension detailed rubric + optional LLM critique' } },
         '/api/integrity-audit/run': { post: { summary: '6-pillar unified final research integrity audit' } },
         '/api/paper-refinement/start': { post: { summary: 'Durable async refinement pipeline' } },
@@ -258,9 +302,9 @@ export function createApiRouter() {
   });
 
   // ---------------- AUTHENTICATION ----------------
-  router.post('/auth/register', async (req, res) => {
+  router.post('/auth/register', authRateLimit, async (req, res) => {
     try {
-      const { email, password, name, institution = '', role = 'Researcher' } = req.body ?? {};
+      const { email, password, name, institution = '' } = req.body ?? {};
       if (!email || !password || !name || String(password).length < 8) {
         return res.status(400).json({ error: 'Name, valid email, and password (min 8 chars) are required.' });
       }
@@ -272,6 +316,7 @@ export function createApiRouter() {
 
       const id = newId('usr');
       const passwordHash = bcrypt.hashSync(String(password), 10);
+      // Role is strictly server-assigned to prevent privilege escalation.
       const inserted = await db
         .insert(users)
         .values({
@@ -280,7 +325,7 @@ export function createApiRouter() {
           email: normalizedEmail,
           name: String(name).trim(),
           institution: String(institution).trim(),
-          role: String(role).trim(),
+          role: 'Researcher',
           passwordHash,
           authProvider: 'local',
           consentAnalytics: false,
@@ -289,7 +334,7 @@ export function createApiRouter() {
         .returning();
 
       const u = inserted[0];
-      const token = signSessionToken({ sub: u.id, email: u.email });
+      const token = signSessionToken({ sub: u.id, email: u.email, provider: 'local' });
       return res.status(201).json({
         token,
         user: {
@@ -298,6 +343,7 @@ export function createApiRouter() {
           name: u.name,
           institution: u.institution,
           role: u.role,
+          authProvider: u.authProvider,
           consentAnalytics: u.consentAnalytics,
           consentRetention: u.consentRetention,
         },
@@ -308,7 +354,7 @@ export function createApiRouter() {
     }
   });
 
-  router.post('/auth/login', async (req, res) => {
+  router.post('/auth/login', authRateLimit, async (req, res) => {
     try {
       const { email, password } = req.body ?? {};
       if (!email || !password) {
@@ -317,10 +363,16 @@ export function createApiRouter() {
       const normalizedEmail = String(email).trim().toLowerCase();
       const rows = await db.select().from(users).where(eq(users.email, normalizedEmail)).limit(1);
       const row = rows[0];
-      if (!row || !row.passwordHash || !bcrypt.compareSync(String(password), row.passwordHash)) {
+      if (
+        !row ||
+        row.authProvider === 'firebase' ||
+        row.authProvider === 'demo' ||
+        !row.passwordHash ||
+        !bcrypt.compareSync(String(password), row.passwordHash)
+      ) {
         return res.status(401).json({ error: 'Invalid email or password.' });
       }
-      const token = signSessionToken({ sub: row.id, email: row.email });
+      const token = signSessionToken({ sub: row.id, email: row.email, provider: 'local' });
       return res.json({
         token,
         user: {
@@ -329,6 +381,7 @@ export function createApiRouter() {
           name: row.name,
           institution: row.institution,
           role: row.role,
+          authProvider: row.authProvider,
           consentAnalytics: row.consentAnalytics,
           consentRetention: row.consentRetention,
         },
@@ -339,7 +392,7 @@ export function createApiRouter() {
     }
   });
 
-  router.post('/auth/firebase', async (req, res) => {
+  router.post('/auth/firebase', authRateLimit, async (req, res) => {
     try {
       const { idToken } = req.body ?? {};
       const authHeader = req.headers.authorization;
@@ -347,8 +400,13 @@ export function createApiRouter() {
       if (!token) {
         return res.status(400).json({ error: 'Firebase ID token is required.' });
       }
-      const decoded = await adminAuth.verifyIdToken(token);
-      const u = await getOrCreateFirebaseUser(decoded.uid, decoded.email || '', decoded.name || undefined);
+      const checkRevoked = process.env.FIREBASE_CHECK_REVOKED === 'true';
+      const decodedRaw = await adminAuth.verifyIdToken(token, checkRevoked);
+      const claims = validateFirebaseDecodedClaims(decodedRaw);
+      if (!claims) {
+        return res.status(401).json({ error: 'Invalid Firebase token claims.' });
+      }
+      const u = await getOrCreateFirebaseUser(claims.uid, claims.email || '', claims.name);
       return res.json({
         token,
         user: {
@@ -357,23 +415,28 @@ export function createApiRouter() {
           name: u.name,
           institution: u.institution,
           role: u.role,
+          authProvider: u.authProvider,
           consentAnalytics: u.consentAnalytics,
           consentRetention: u.consentRetention,
         },
       });
-    } catch (error) {
+    } catch (error: any) {
+      const msg = String(error?.message || '');
+      if (msg.includes('isolated demo workspace')) {
+        return res.status(403).json({ error: msg });
+      }
       console.error('Firebase token verification error:', error);
       return res.status(401).json({ error: 'Invalid or expired Firebase authentication token.' });
     }
   });
 
-  router.post('/auth/demo', async (_req, res) => {
+  router.post('/auth/demo', authRateLimit, async (_req, res) => {
     if (!isDemoEnabled()) {
       return res.status(403).json({ error: 'Demo workspace login is disabled in production.' });
     }
     try {
       const demoUser = await ensureDemoWorkspaceSeeded();
-      const token = signSessionToken({ sub: demoUser.id, email: demoUser.email });
+      const token = signSessionToken({ sub: demoUser.id, email: demoUser.email, provider: 'demo' });
       return res.json({
         token,
         user: {
@@ -382,6 +445,7 @@ export function createApiRouter() {
           name: demoUser.name,
           institution: demoUser.institution,
           role: demoUser.role,
+          authProvider: demoUser.authProvider,
           consentAnalytics: demoUser.consentAnalytics,
           consentRetention: demoUser.consentRetention,
         },
@@ -390,6 +454,11 @@ export function createApiRouter() {
       console.error('Demo login error:', error);
       return res.status(500).json({ error: 'Failed to prepare demo workspace.' });
     }
+  });
+
+  router.post('/auth/logout', requireAuth, async (req: AuthRequest, res) => {
+    await logActivity(req.user!.id, 'Authentication', 'Signed out of workspace', req.user!.email, 'Completed');
+    return res.json({ loggedOut: true });
   });
 
   router.get('/auth/me', requireAuth, (req: AuthRequest, res) => {
@@ -401,31 +470,47 @@ export function createApiRouter() {
         name: u.name,
         institution: u.institution,
         role: u.role,
+        authProvider: u.authProvider,
         consentAnalytics: u.consentAnalytics,
         consentRetention: u.consentRetention,
       },
     });
   });
 
-  router.patch('/auth/settings', requireAuth, async (req: AuthRequest, res) => {
+  const handleUpdateSettings = async (req: AuthRequest, res: Response) => {
     try {
-      const { name, institution, role, consentAnalytics, consentRetention } = req.body ?? {};
+      const { name, institution, consentAnalytics, consentRetention } = req.body ?? {};
       const updates: Record<string, any> = {};
       if (typeof name === 'string' && name.trim()) updates.name = name.trim();
       if (typeof institution === 'string') updates.institution = institution.trim();
-      if (typeof role === 'string' && role.trim()) updates.role = role.trim();
       if (typeof consentAnalytics === 'boolean') updates.consentAnalytics = consentAnalytics;
       if (typeof consentRetention === 'boolean') updates.consentRetention = consentRetention;
 
       if (Object.keys(updates).length > 0) {
         await db.update(users).set(updates).where(eq(users.id, req.user!.id));
       }
-      return res.json({ updated: true });
+      const [fresh] = await db.select().from(users).where(eq(users.id, req.user!.id)).limit(1);
+      const u = fresh || req.user!;
+      return res.json({
+        updated: true,
+        user: {
+          id: u.id,
+          email: u.email,
+          name: u.name,
+          institution: u.institution,
+          role: u.role,
+          authProvider: u.authProvider,
+          consentAnalytics: u.consentAnalytics,
+          consentRetention: u.consentRetention,
+        },
+      });
     } catch (error) {
       console.error('Settings update error:', error);
       return res.status(500).json({ error: 'Failed to update researcher settings.' });
     }
-  });
+  };
+  router.patch('/auth/settings', requireAuth, handleUpdateSettings);
+  router.put('/auth/settings', requireAuth, handleUpdateSettings);
 
   router.delete('/auth/data', requireAuth, async (req: AuthRequest, res) => {
     try {
@@ -452,11 +537,15 @@ export function createApiRouter() {
   // ---------------- PROJECTS & MODULE 6 ANALYZER ----------------
   router.get('/projects', requireAuth, async (req: AuthRequest, res) => {
     try {
+      const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 50));
+      const offset = Math.max(0, Number(req.query.offset) || 0);
       const rows = await db
         .select()
         .from(projects)
         .where(eq(projects.userId, req.user!.id))
-        .orderBy(desc(projects.updatedAt));
+        .orderBy(desc(projects.updatedAt))
+        .limit(limit)
+        .offset(offset);
       return res.json({
         projects: rows.map((r) => ({
           id: r.id,
@@ -470,6 +559,7 @@ export function createApiRouter() {
           created_at: r.createdAt.toISOString(),
           updated_at: r.updatedAt.toISOString(),
         })),
+        pagination: { limit, offset },
       });
     } catch (error) {
       console.error('Projects list error:', error);
@@ -623,6 +713,8 @@ export function createApiRouter() {
   // ---------------- DOCUMENTS & STUDIO ----------------
   router.get('/documents', requireAuth, async (req: AuthRequest, res) => {
     try {
+      const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 50));
+      const offset = Math.max(0, Number(req.query.offset) || 0);
       const rows = await db
         .select({
           id: documents.id,
@@ -637,13 +729,16 @@ export function createApiRouter() {
         })
         .from(documents)
         .where(eq(documents.userId, req.user!.id))
-        .orderBy(desc(documents.updatedAt));
+        .orderBy(desc(documents.updatedAt))
+        .limit(limit)
+        .offset(offset);
       return res.json({
         documents: rows.map((d) => ({
           ...d,
           created_at: d.created_at.toISOString(),
           updated_at: d.updated_at.toISOString(),
         })),
+        pagination: { limit, offset },
       });
     } catch (error) {
       console.error('Documents list error:', error);
@@ -711,7 +806,19 @@ export function createApiRouter() {
       } else {
         return res
           .status(400)
-          .json({ error: 'Upload a supported file (.pdf, .docx, .doc, .txt, .md, .rtf, .tex) or supply text.' });
+          .json({ error: 'Upload a supported file (.pdf, .docx, .doc, .txt, .md, .rtf, .tex, .bib) or supply text.' });
+      }
+
+      const cleanProjectId = req.body?.projectId ? String(req.body.projectId).trim() : null;
+      if (cleanProjectId) {
+        const [ownedProj] = await db
+          .select({ id: projects.id })
+          .from(projects)
+          .where(and(eq(projects.id, cleanProjectId), eq(projects.userId, req.user!.id)))
+          .limit(1);
+        if (!ownedProj) {
+          return res.status(404).json({ error: 'Referenced project not found.' });
+        }
       }
 
       const id = newId('doc');
@@ -727,7 +834,7 @@ export function createApiRouter() {
       await db.insert(documents).values({
         id,
         userId: req.user!.id,
-        projectId: req.body?.projectId || null,
+        projectId: cleanProjectId,
         title,
         format: parsed.format,
         citationStyle: req.body?.citationStyle || 'IEEE',
@@ -850,9 +957,53 @@ export function createApiRouter() {
 
       const format = String(req.query.format || 'docx').toLowerCase();
       const style = String(req.query.style || doc.citationStyle || 'IEEE').toUpperCase();
+      const includeUnverified = String(req.query.includeUnverified || 'false').toLowerCase() === 'true';
       const sections: ParsedSection[] = JSON.parse(doc.sectionsJson || '[]');
       const references: string[] = JSON.parse(doc.referencesJson || '[]');
       const safeSlug = doc.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 50) || 'manuscript';
+
+      if (format === 'bib') {
+        const persisted = await db
+          .select()
+          .from(citationsTable)
+          .where(and(eq(citationsTable.documentId, doc.id), eq(citationsTable.userId, req.user!.id)))
+          .orderBy(desc(citationsTable.createdAt));
+
+        let bibItems: Array<Record<string, any> | string> = references;
+        if (persisted.length > 0) {
+          const seenRaw = new Set<string>();
+          bibItems = [];
+          for (const row of persisted) {
+            if (seenRaw.has(row.rawReference)) continue;
+            seenRaw.add(row.rawReference);
+            try {
+              const parsedDetail = JSON.parse(row.detailsJson || '{}');
+              if (parsedDetail && typeof parsedDetail === 'object' && Object.keys(parsedDetail).length > 0) {
+                bibItems.push(parsedDetail);
+                continue;
+              }
+            } catch {
+              // fallback to columns
+            }
+            bibItems.push({
+              id: row.id,
+              rawReference: row.rawReference,
+              matchedTitle: row.title,
+              authors: row.authors.split(',').map((a) => a.trim()).filter(Boolean),
+              year: row.year,
+              venue: row.venue,
+              doi: row.doi,
+              url: row.url,
+              status: row.verificationStatus.toLowerCase().includes('verified') ? 'Verified' : 'Unverified',
+            });
+          }
+        }
+
+        const exported = exportBibtexCollection(bibItems, includeUnverified);
+        res.setHeader('Content-Type', 'application/x-bibtex');
+        res.setHeader('Content-Disposition', `attachment; filename="${safeSlug}.bib"`);
+        return res.send(exported.bibtex);
+      }
 
       if (format === 'docx') {
         const buf = await generateDocxBuffer({ title: doc.title, sections, references, style });
@@ -914,7 +1065,8 @@ export function createApiRouter() {
           .from(projects)
           .where(and(eq(projects.id, String(projectId)), eq(projects.userId, req.user!.id)))
           .limit(1);
-        if (proj) projectAnalysis = JSON.parse(proj.analysisJson);
+        if (!proj) return res.status(404).json({ error: 'Referenced project not found.' });
+        projectAnalysis = JSON.parse(proj.analysisJson);
       }
 
       const formatStd = String(paperFormat).toUpperCase() === 'APA' ? 'APA' : 'IEEE';
@@ -995,18 +1147,26 @@ export function createApiRouter() {
         return res.status(400).json({ error: 'Supply at least 25 characters of manuscript text for similarity scanning.' });
       }
 
+      const pgChunks = await queryPgvectorSimilarChunks(req.user!.id, targetText, documentId ? String(documentId) : undefined, 8);
+      const pgDocIds = new Set(pgChunks.map((c: { id: string }) => c.id));
+
       const otherDocs = await db
         .select({ id: documents.id, title: documents.title, rawText: documents.rawText })
         .from(documents)
         .where(and(eq(documents.userId, req.user!.id), ne(documents.id, String(documentId || ''))))
         .limit(10);
 
-      const workspaceCorpus: CorpusDocument[] = otherDocs.map((d) => ({
-        id: d.id,
-        title: d.title,
-        source: 'Workspace Document',
-        text: d.rawText,
-      }));
+      const workspaceCorpus: CorpusDocument[] = [
+        ...pgChunks,
+        ...otherDocs
+          .filter((d) => !pgDocIds.has(d.id))
+          .map((d) => ({
+            id: d.id,
+            title: d.title,
+            source: 'Workspace Document',
+            text: d.rawText,
+          })),
+      ];
 
       const arxivDocs = queryArxiv ? await fetchArxivRelatedAbstracts(targetText.slice(0, 300), 4) : [];
       const fullCorpus = [...BUILTIN_REFERENCE_CORPUS, ...workspaceCorpus, ...arxivDocs];
@@ -1160,6 +1320,125 @@ export function createApiRouter() {
       return res.json({ checkId: id, title: targetTitle, audit, claimCheck });
     } catch (err: any) {
       return res.status(500).json({ error: err?.message || 'Citation verification error.' });
+    }
+  });
+
+  router.post('/citations/export-bibtex', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const { documentId, citations, includeUnverified = false } = req.body ?? {};
+      let items: Array<Record<string, any> | string> = [];
+
+      if (Array.isArray(citations) && citations.length > 0) {
+        items = citations;
+      } else if (documentId) {
+        const [doc] = await db
+          .select()
+          .from(documents)
+          .where(and(eq(documents.id, String(documentId)), eq(documents.userId, req.user!.id)))
+          .limit(1);
+        if (!doc) return res.status(404).json({ error: 'Document not found.' });
+
+        const persisted = await db
+          .select()
+          .from(citationsTable)
+          .where(and(eq(citationsTable.documentId, doc.id), eq(citationsTable.userId, req.user!.id)))
+          .orderBy(desc(citationsTable.createdAt));
+
+        if (persisted.length > 0) {
+          const seenRaw = new Set<string>();
+          for (const row of persisted) {
+            if (seenRaw.has(row.rawReference)) continue;
+            seenRaw.add(row.rawReference);
+            try {
+              const parsedDetail = JSON.parse(row.detailsJson || '{}');
+              if (parsedDetail && typeof parsedDetail === 'object' && Object.keys(parsedDetail).length > 0) {
+                items.push(parsedDetail);
+                continue;
+              }
+            } catch {
+              // fallback
+            }
+            items.push({
+              id: row.id,
+              rawReference: row.rawReference,
+              matchedTitle: row.title,
+              authors: row.authors.split(',').map((a) => a.trim()).filter(Boolean),
+              year: row.year,
+              venue: row.venue,
+              doi: row.doi,
+              url: row.url,
+              status: row.verificationStatus.toLowerCase().includes('verified') ? 'Verified' : 'Unverified',
+            });
+          }
+        } else {
+          items = JSON.parse(doc.referencesJson || '[]');
+        }
+      } else {
+        return res.status(400).json({ error: 'Provide citations or documentId to export BibTeX.' });
+      }
+
+      const result = exportBibtexCollection(items, Boolean(includeUnverified));
+      return res.json(result);
+    } catch (err: any) {
+      return res.status(500).json({ error: err?.message || 'BibTeX export failed.' });
+    }
+  });
+
+  router.post('/citations/verify-bibtex', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const { bibtexText, includeUnverified = false } = req.body ?? {};
+      if (!bibtexText || String(bibtexText).trim().length < 5) {
+        return res.status(400).json({ error: 'Provide BibTeX entries (@article{...}, etc.) to verify.' });
+      }
+      const report = await verifyBibtexEntries(String(bibtexText), Boolean(includeUnverified));
+      if (report.summary.totalEntries === 0) {
+        return res
+          .status(400)
+          .json({ error: 'No valid BibTeX entries (@type{key, ...}) could be parsed from the provided input.' });
+      }
+
+      const id = newId('bibchk');
+      await db.insert(citationChecks).values({
+        id,
+        userId: req.user!.id,
+        documentId: null,
+        title: 'BibTeX Cross-Reference Verification',
+        citationsJson: JSON.stringify(report.entries),
+        summaryJson: JSON.stringify(report.summary),
+      });
+
+      if (report.entries.length > 0) {
+        await db.insert(citationsTable).values(
+          report.entries.map((entry) => ({
+            id: newId('citrow'),
+            userId: req.user!.id,
+            documentId: null,
+            rawReference: entry.rawReference,
+            doi: entry.doi || '',
+            title: entry.matchedTitle || entry.declared.title || '',
+            authors: entry.authors.join(', ').slice(0, 500),
+            year: String(entry.year || ''),
+            venue: String(entry.venue || '').slice(0, 250),
+            url: String(entry.url || '').slice(0, 500),
+            verificationStatus: entry.bibliographicStatus,
+            claimSupportStatus: entry.verifiedMetadata ? 'Source retrieved' : 'Evidence insufficient',
+            sourceProvider: entry.matchedProvider,
+            detailsJson: JSON.stringify(entry),
+          }))
+        );
+      }
+
+      await logActivity(
+        req.user!.id,
+        'Citation Intelligence',
+        `Verified ${report.summary.verifiedCount}/${report.summary.totalEntries} BibTeX entries`,
+        'BibTeX Cross-Reference Audit',
+        report.summary.unverifiedCount > 0 ? 'Unverified' : report.summary.needsReviewCount > 0 ? 'Needs review' : 'Verified'
+      );
+
+      return res.json({ checkId: id, ...report });
+    } catch (err: any) {
+      return res.status(500).json({ error: err?.message || 'BibTeX verification failed.' });
     }
   });
 
@@ -1403,6 +1682,7 @@ export function createApiRouter() {
         scope: String(scope),
         status: 'queued',
         progress: 5,
+        payloadJson: JSON.stringify({ sectionIds, preserveTerms, engineMode: engineChoice, paragraphTarget }),
         originalSectionsJson: JSON.stringify(allSections),
         refinedSectionsJson: '[]',
         metricsJson: JSON.stringify({ preserveTerms, engineMode: engineChoice, paragraphTarget }),
@@ -1422,13 +1702,13 @@ export function createApiRouter() {
         paragraphTarget
       );
 
-      return res.status(202).json({ jobId, status: 'processing' });
+      return res.status(202).json({ jobId, id: jobId, status: 'processing' });
     } catch (err: any) {
       return res.status(500).json({ error: err?.message || 'Unable to start refinement pipeline.' });
     }
   });
 
-  router.get('/paper-refinement/jobs/:jobId', requireAuth, async (req: AuthRequest, res) => {
+  const handleGetJobStatus = async (req: AuthRequest, res: Response) => {
     try {
       const [job] = await db
         .select()
@@ -1456,9 +1736,9 @@ export function createApiRouter() {
       console.error('Refinement job poll error:', error);
       return res.status(500).json({ error: 'Failed to inspect refinement job.' });
     }
-  });
+  };
 
-  router.post('/paper-refinement/jobs/:jobId/cancel', requireAuth, async (req: AuthRequest, res) => {
+  const handleCancelJob = async (req: AuthRequest, res: Response) => {
     try {
       const [job] = await db
         .select()
@@ -1476,9 +1756,9 @@ export function createApiRouter() {
       console.error('Refinement cancel error:', error);
       return res.status(500).json({ error: 'Failed to cancel refinement job.' });
     }
-  });
+  };
 
-  router.post('/paper-refinement/jobs/:jobId/retry', requireAuth, async (req: AuthRequest, res) => {
+  const handleRetryJob = async (req: AuthRequest, res: Response) => {
     try {
       const [job] = await db
         .select()
@@ -1495,7 +1775,10 @@ export function createApiRouter() {
       if (!doc) return res.status(404).json({ error: 'Document not found.' });
 
       const allSections: ParsedSection[] = JSON.parse(job.originalSectionsJson || '[]');
+      const storedPayload = JSON.parse(job.payloadJson || job.metricsJson || '{}');
       const storedMeta = JSON.parse(job.metricsJson || '{}');
+      const targetIds: string[] = Array.isArray(storedPayload.sectionIds) ? storedPayload.sectionIds : [];
+      const targetSections = targetIds.length > 0 ? allSections.filter((s) => targetIds.includes(s.id)) : allSections;
       const nextRetries = (job.retries ?? 0) + 1;
 
       await db
@@ -1509,12 +1792,12 @@ export function createApiRouter() {
         doc.id,
         doc.title,
         allSections,
-        allSections,
+        targetSections.length > 0 ? targetSections : allSections,
         job.mode as RefinementMode,
         job.scope,
-        String(storedMeta.preserveTerms || ''),
-        storedMeta.engineMode === 'local' ? 'local' : 'gemini',
-        storedMeta.paragraphTarget
+        String(storedPayload.preserveTerms ?? storedMeta.preserveTerms ?? ''),
+        (storedPayload.engineMode ?? storedMeta.engineMode) === 'local' ? 'local' : 'gemini',
+        storedPayload.paragraphTarget ?? storedMeta.paragraphTarget
       );
 
       return res.json({ retried: true, id: job.id, retries: nextRetries, status: 'processing' });
@@ -1522,9 +1805,9 @@ export function createApiRouter() {
       console.error('Refinement retry error:', error);
       return res.status(500).json({ error: 'Failed to retry refinement job.' });
     }
-  });
+  };
 
-  router.post('/paper-refinement/approve/:jobId', requireAuth, async (req: AuthRequest, res) => {
+  const handleApproveJob = async (req: AuthRequest, res: Response) => {
     try {
       const [job] = await db
         .select()
@@ -1580,19 +1863,32 @@ export function createApiRouter() {
       console.error('Refinement approve error:', error);
       return res.status(500).json({ error: 'Failed to save approved revision.' });
     }
-  });
+  };
+
+  router.get('/paper-refinement/jobs/:jobId', requireAuth, handleGetJobStatus);
+  router.get('/jobs/:jobId', requireAuth, handleGetJobStatus);
+  router.post('/paper-refinement/jobs/:jobId/cancel', requireAuth, handleCancelJob);
+  router.post('/paper-refinement/cancel/:jobId', requireAuth, handleCancelJob);
+  router.post('/jobs/:jobId/cancel', requireAuth, handleCancelJob);
+  router.post('/paper-refinement/jobs/:jobId/retry', requireAuth, handleRetryJob);
+  router.post('/paper-refinement/retry/:jobId', requireAuth, handleRetryJob);
+  router.post('/jobs/:jobId/retry', requireAuth, handleRetryJob);
+  router.post('/paper-refinement/approve/:jobId', requireAuth, handleApproveJob);
+  router.post('/paper-refinement/:jobId/approve', requireAuth, handleApproveJob);
 
   // ---------------- REPORTS & HISTORY ----------------
   router.get('/reports', requireAuth, async (req: AuthRequest, res) => {
     try {
+      const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 20));
+      const offset = Math.max(0, Number(req.query.offset) || 0);
       const uid = req.user!.id;
       const [simRows, citRows, wrtRows, qualRows, audRows, jobRows] = await Promise.all([
-        db.select().from(similarityReports).where(eq(similarityReports.userId, uid)).orderBy(desc(similarityReports.createdAt)).limit(20),
-        db.select().from(citationChecks).where(eq(citationChecks.userId, uid)).orderBy(desc(citationChecks.createdAt)).limit(20),
-        db.select().from(writingAnalyses).where(eq(writingAnalyses.userId, uid)).orderBy(desc(writingAnalyses.createdAt)).limit(20),
-        db.select().from(qualityEvaluations).where(eq(qualityEvaluations.userId, uid)).orderBy(desc(qualityEvaluations.createdAt)).limit(20),
-        db.select().from(integrityAudits).where(eq(integrityAudits.userId, uid)).orderBy(desc(integrityAudits.createdAt)).limit(20),
-        db.select().from(refinementJobs).where(eq(refinementJobs.userId, uid)).orderBy(desc(refinementJobs.createdAt)).limit(20),
+        db.select().from(similarityReports).where(eq(similarityReports.userId, uid)).orderBy(desc(similarityReports.createdAt)).limit(limit).offset(offset),
+        db.select().from(citationChecks).where(eq(citationChecks.userId, uid)).orderBy(desc(citationChecks.createdAt)).limit(limit).offset(offset),
+        db.select().from(writingAnalyses).where(eq(writingAnalyses.userId, uid)).orderBy(desc(writingAnalyses.createdAt)).limit(limit).offset(offset),
+        db.select().from(qualityEvaluations).where(eq(qualityEvaluations.userId, uid)).orderBy(desc(qualityEvaluations.createdAt)).limit(limit).offset(offset),
+        db.select().from(integrityAudits).where(eq(integrityAudits.userId, uid)).orderBy(desc(integrityAudits.createdAt)).limit(limit).offset(offset),
+        db.select().from(refinementJobs).where(eq(refinementJobs.userId, uid)).orderBy(desc(refinementJobs.createdAt)).limit(limit).offset(offset),
       ]);
 
       return res.json({

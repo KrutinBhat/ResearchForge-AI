@@ -17,8 +17,9 @@ def upgrade() -> None:
     op.add_column("users", sa.Column("uid", sa.Text(), nullable=True))
     op.add_column("users", sa.Column("auth_provider", sa.String(32), nullable=False, server_default="local"))
     op.execute("UPDATE users SET uid = 'local:' || id WHERE uid IS NULL")
-    op.alter_column("users", "uid", nullable=False)
-    op.create_unique_constraint("users_uid_unique", "users", ["uid"])
+    with op.batch_alter_table("users", schema=None) as batch_op:
+        batch_op.alter_column("uid", existing_type=sa.Text(), nullable=False)
+        batch_op.create_unique_constraint("users_uid_unique", ["uid"])
 
     op.add_column("documents", sa.Column("metadata_json", sa.Text(), nullable=False, server_default="{}"))
 
@@ -88,6 +89,7 @@ def downgrade() -> None:
     op.drop_column("refinement_jobs", "retries")
     op.drop_column("refinement_jobs", "error_message")
     op.drop_column("documents", "metadata_json")
-    op.drop_constraint("users_uid_unique", "users", type_="unique")
-    op.drop_column("users", "auth_provider")
-    op.drop_column("users", "uid")
+    with op.batch_alter_table("users", schema=None) as batch_op:
+        batch_op.drop_constraint("users_uid_unique", type_="unique")
+        batch_op.drop_column("auth_provider")
+        batch_op.drop_column("uid")

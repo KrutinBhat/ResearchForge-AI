@@ -8,13 +8,21 @@ export function SettingsPage() {
   const { user, refreshUser } = useAuth();
   const [name, setName] = useState(user?.name || '');
   const [institution, setInstitution] = useState(user?.institution || '');
-  const [role, setRole] = useState(user?.role || 'Researcher');
   const [consentAnalytics, setConsentAnalytics] = useState(user?.consentAnalytics ?? false);
   const [consentRetention, setConsentRetention] = useState(user?.consentRetention ?? true);
   const [saving, setSaving] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
+
+  React.useEffect(() => {
+    if (user) {
+      setName(user.name);
+      setInstitution(user.institution);
+      setConsentAnalytics(user.consentAnalytics);
+      setConsentRetention(user.consentRetention);
+    }
+  }, [user]);
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -24,7 +32,7 @@ export function SettingsPage() {
     try {
       await apiFetch('/api/auth/settings', {
         method: 'PATCH',
-        body: JSON.stringify({ name, institution, role, consentAnalytics, consentRetention }),
+        body: JSON.stringify({ name, institution, consentAnalytics, consentRetention }),
       });
       await refreshUser();
       setMessage('Account and privacy settings updated.');
@@ -95,14 +103,14 @@ export function SettingsPage() {
             </div>
             <div>
               <label htmlFor="set-role" className="block text-xs font-medium text-slate-700 mb-1">
-                Academic Role
+                Workspace Role (Server-Assigned)
               </label>
               <input
                 id="set-role"
                 type="text"
-                value={role}
-                onChange={(e) => setRole(e.target.value)}
-                className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg"
+                readOnly
+                value={user?.role || 'Researcher'}
+                className="w-full px-3 py-2 text-sm border border-slate-200 bg-slate-50 text-slate-600 rounded-lg cursor-not-allowed"
               />
             </div>
           </div>

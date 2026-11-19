@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { FolderGit2, Upload, GitBranch, ShieldCheck, Trash2 } from 'lucide-react';
 import { WorkspaceLayout } from '../components/WorkspaceLayout';
 import { StatusLabel } from '../components/StatusLabel';
-import { apiFetch } from '../lib/api';
+import { apiFetch, apiUploadWithProgress } from '../lib/api';
 
 interface ProjectRecord {
   id: string;
@@ -59,6 +59,7 @@ export function ProjectAnalyzerPage() {
   const [projectTitle, setProjectTitle] = useState('');
   const [loading, setLoading] = useState(true);
   const [analyzing, setAnalyzing] = useState(false);
+  const [uploadPercent, setUploadPercent] = useState<number | null>(null);
   const [error, setError] = useState('');
 
   // Cross-check state
@@ -97,14 +98,16 @@ export function ProjectAnalyzerPage() {
     if (!zipFile) return;
     setError('');
     setAnalyzing(true);
+    setUploadPercent(0);
     try {
       const fd = new FormData();
       fd.append('archive', zipFile);
       if (projectTitle.trim()) fd.append('title', projectTitle.trim());
-      const res = await apiFetch<{ project: ProjectRecord }>('/api/projects/analyze-zip', {
-        method: 'POST',
-        body: fd,
-      });
+      const res = await apiUploadWithProgress<{ project: ProjectRecord }>(
+        '/api/projects/analyze-zip',
+        fd,
+        (pct) => setUploadPercent(pct)
+      );
       setProjects((prev) => [res.project, ...prev]);
       setSelectedProjectId(res.project.id);
       setZipFile(null);
@@ -113,6 +116,7 @@ export function ProjectAnalyzerPage() {
       setError(err.message);
     } finally {
       setAnalyzing(false);
+      setUploadPercent(null);
     }
   };
 
@@ -209,12 +213,21 @@ export function ProjectAnalyzerPage() {
               className="block w-full text-xs text-slate-600 file:mr-3 file:py-2 file:px-4 file:rounded-lg file:border file:border-slate-300 file:text-xs file:font-medium file:bg-slate-50 hover:file:bg-slate-100"
             />
           </div>
+          {analyzing && uploadPercent !== null && (
+            <div className="w-full h-1.5 bg-slate-100 rounded-full overflow-hidden">
+              <div className="h-full bg-blue-700 transition-all duration-150" style={{ width: `${uploadPercent}%` }} />
+            </div>
+          )}
           <button
             type="submit"
             disabled={!zipFile || analyzing}
             className="px-4 py-2 text-xs font-semibold text-white bg-blue-800 rounded-lg hover:bg-blue-900 disabled:opacity-50"
           >
-            {analyzing ? 'Extracting statically...' : 'Upload & Extract Project'}
+            {analyzing
+              ? uploadPercent !== null && uploadPercent < 100
+                ? `Uploading ZIP (${uploadPercent}%)...`
+                : 'Extracting statically...'
+              : 'Upload & Extract Project'}
           </button>
         </form>
 

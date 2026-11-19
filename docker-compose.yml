@@ -34,14 +34,23 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/ready', timeout=3)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 5
     environment:
       ENVIRONMENT: development
       ENABLE_DEMO_WORKSPACE: "true"
+      FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID:-}
+      FIREBASE_SERVICE_ACCOUNT_JSON: ${FIREBASE_SERVICE_ACCOUNT_JSON:-}
+      FIREBASE_CHECK_REVOKED: ${FIREBASE_CHECK_REVOKED:-false}
+      CORS_ORIGINS: http://localhost:3000,http://127.0.0.1:3000
       SQL_HOST: postgres
       SQL_USER: researchforge
       SQL_PASSWORD: researchforge_dev_password
       SQL_DB_NAME: researchforge
-      JWT_SECRET: ${JWT_SECRET:-replace-with-strong-random-secret}
+      JWT_SECRET: ${JWT_SECRET:-dev-only-change-before-staging-or-production}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/0
@@ -56,12 +65,21 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import sys; from app.worker import check_redis_health; sys.exit(0 if check_redis_health() else 1)\""]
+      interval: 20s
+      timeout: 5s
+      retries: 5
     environment:
       ENVIRONMENT: development
+      FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID:-}
+      FIREBASE_SERVICE_ACCOUNT_JSON: ${FIREBASE_SERVICE_ACCOUNT_JSON:-}
+      FIREBASE_CHECK_REVOKED: ${FIREBASE_CHECK_REVOKED:-false}
       SQL_HOST: postgres
       SQL_USER: researchforge
       SQL_PASSWORD: researchforge_dev_password
       SQL_DB_NAME: researchforge
+      JWT_SECRET: ${JWT_SECRET:-dev-only-change-before-staging-or-production}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/0

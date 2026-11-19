@@ -7,7 +7,11 @@ from typing import Any, Dict, List, Tuple
 
 from ..core.security import validate_file_signature
 
-SUPPORTED_EXTENSIONS = {"pdf", "docx", "doc", "txt", "md", "rtf", "tex"}
+SUPPORTED_EXTENSIONS = {"pdf", "docx", "doc", "txt", "md", "rtf", "tex", "bib"}
+
+MIN_DIGITAL_CHARS_PER_PAGE = 50
+MAX_OCR_PAGES = 30
+MAX_PDF_PAGES = 150
 
 HEADING_RE = re.compile(
     r"^(?:[IVX]+\.\s+|\d+(?:\.\d+)*\.?\s+|#{1,3}\s+)?"
@@ -18,6 +22,28 @@ HEADING_RE = re.compile(
     r"conclusion|conclusions|future work|future scope|acknowledgments?|references|bibliography)\s*:?$",
     re.IGNORECASE,
 )
+
+
+def evaluate_pdf_page_ocr_plan(
+    page_char_counts: List[int],
+    threshold: int = MIN_DIGITAL_CHARS_PER_PAGE,
+    max_ocr_pages: int = MAX_OCR_PAGES,
+) -> Dict[str, Any]:
+    """Classify each 1-based PDF page needing OCR (< threshold chars) and enforce the page cap."""
+    scanned_pages = [idx + 1 for idx, count in enumerate(page_char_counts) if count < threshold]
+    pages_to_ocr = scanned_pages[:max_ocr_pages]
+    skipped_pages = scanned_pages[max_ocr_pages:]
+    digital_pages = len(page_char_counts) - len(scanned_pages)
+    is_mixed = digital_pages > 0 and len(scanned_pages) > 0
+    return {
+        "scannedPagesDetected": scanned_pages,
+        "pagesToOcr": pages_to_ocr,
+        "skippedPagesDueToLimit": skipped_pages,
+        "digitalPageCount": digital_pages,
+        "isMixedPdf": is_mixed,
+        "thresholdChars": threshold,
+        "pageLimitApplied": max_ocr_pages,
+    }
 
 
 def detect_format(filename: str, content_type: str = "") -> str:
@@ -34,6 +60,8 @@ def detect_format(filename: str, content_type: str = "") -> str:
         return "rtf"
     if "x-tex" in content_type:
         return "tex"
+    if "bibtex" in content_type:
+        return "bib"
     return "txt"
 
 
@@ -187,51 +215,145 @@ def segment_sections(raw_text: str) -> Tuple[List[Dict[str, str]], List[str]]:
     return sections, references
 
 
-def _extract_pdf_with_ocr_fallback(data: bytes) -> Tuple[str, bool, bool, int, List[str]]:
+def _get_page_text(page: Any) -> str:
+    try:
+        return (page.get_text("text", sort=True) or "").strip()
+    except TypeError:
+        return (page.get_text("text") or "").strip()
+
+
+def _extract_pdf_with_ocr_fallback(data: bytes) -> Tuple[str, bool, bool, int, Dict[str, Any], List[str]]:
     warnings: List[str] = []
     ocr_required = False
     ocr_applied = False
     page_count = 0
+    ocr_summary: Dict[str, Any] = {
+        "scannedPagesDetected": [],
+        "ocrPagesProcessed": [],
+        "skippedPagesDueToLimit": [],
+        "isMixedPdf": False,
+        "averageConfidence": None,
+        "pageLimitApplied": MAX_OCR_PAGES,
+        "thresholdChars": MIN_DIGITAL_CHARS_PER_PAGE,
+    }
 
     try:
         import fitz  # PyMuPDF
 
         doc = fitz.open(stream=data, filetype="pdf")
-        if doc.needs_pass or doc.is_encrypted:
-            raise ValueError("PDF is password-protected or encrypted. Decrypt the manuscript before uploading.")
+        try:
+            if doc.needs_pass or doc.is_encrypted:
+                raise ValueError("PDF is password-protected or encrypted. Decrypt the manuscript before uploading.")
 
-        page_count = len(doc)
-        pages_text = [page.get_text("text").strip() for page in doc]
-        raw_text = "\n\n".join(p for p in pages_text if p).strip()
+            page_count = len(doc)
+            pages_to_inspect = min(page_count, MAX_PDF_PAGES)
+            if page_count > MAX_PDF_PAGES:
+                warnings.append(
+                    f"PDF has {page_count} pages; inspection capped at first {MAX_PDF_PAGES} pages to bound memory usage."
+                )
 
-        if len(raw_text) < 40 and page_count > 0:
-            try:
-                import pytesseract
-                from PIL import Image
+            pages_text = [_get_page_text(doc[idx]) for idx in range(pages_to_inspect)]
+            plan = evaluate_pdf_page_ocr_plan([len(p) for p in pages_text])
+            ocr_summary.update(
+                {
+                    "scannedPagesDetected": plan["scannedPagesDetected"],
+                    "skippedPagesDueToLimit": plan["skippedPagesDueToLimit"],
+                    "isMixedPdf": plan["isMixedPdf"],
+                }
+            )
 
-                ocr_pages: List[str] = []
-                for page in doc[:25]:
-                    pix = page.get_pixmap(dpi=200)
-                    img = Image.open(io.BytesIO(pix.tobytes("png")))
-                    ocr_txt = pytesseract.image_to_string(img).strip()
-                    if ocr_txt:
-                        ocr_pages.append(ocr_txt)
-                if ocr_pages:
-                    raw_text = "\n\n".join(ocr_pages).strip()
-                    ocr_applied = True
-                    warnings.append(f"Applied Tesseract OCR across {len(ocr_pages)} scanned PDF page(s).")
-                else:
+            if plan["pagesToOcr"]:
+                if plan["skippedPagesDueToLimit"]:
+                    warnings.append(
+                        f"Scanned-page OCR limit reached: running OCR on first {MAX_OCR_PAGES} of "
+                        f"{len(plan['scannedPagesDetected'])} scanned/sparse pages."
+                    )
+                try:
+                    import pytesseract
+                    from PIL import Image
+
+                    confidences: List[float] = []
+                    ocr_pages_processed: List[int] = []
+                    empty_ocr_pages: List[int] = []
+
+                    for pno in plan["pagesToOcr"]:
+                        pix = None
+                        img = None
+                        try:
+                            pix = doc[pno - 1].get_pixmap(dpi=210)
+                            img = Image.open(io.BytesIO(pix.tobytes("png")))
+                            page_conf = None
+                            ocr_txt = ""
+                            try:
+                                data_dict = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
+                                valid_confs = [
+                                    float(c)
+                                    for c in data_dict.get("conf", [])
+                                    if str(c).strip() not in {"", "-1"}
+                                ]
+                                if valid_confs:
+                                    page_conf = sum(valid_confs) / len(valid_confs)
+                                    confidences.append(page_conf)
+                                ocr_txt = pytesseract.image_to_string(img).strip()
+                            except Exception:
+                                ocr_txt = pytesseract.image_to_string(img).strip()
+
+                            if len(ocr_txt) > len(pages_text[pno - 1]):
+                                pages_text[pno - 1] = ocr_txt
+                                ocr_applied = True
+                                ocr_pages_processed.append(pno)
+                            else:
+                                empty_ocr_pages.append(pno)
+                        finally:
+                            if img is not None:
+                                try:
+                                    img.close()
+                                except Exception:
+                                    pass
+                            pix = None
+
+                    ocr_summary["ocrPagesProcessed"] = ocr_pages_processed
+                    if confidences:
+                        avg_conf = round(sum(confidences) / len(confidences), 1)
+                        ocr_summary["averageConfidence"] = avg_conf
+                        if avg_conf < 60.0:
+                            warnings.append(
+                                f"Low Tesseract OCR confidence ({avg_conf}% average); review extracted text for scan noise."
+                            )
+                    if ocr_pages_processed:
+                        kind = "mixed digital+scanned" if plan["isMixedPdf"] else "scanned"
+                        conf_note = (
+                            f" (mean confidence {ocr_summary['averageConfidence']}%)"
+                            if ocr_summary["averageConfidence"] is not None
+                            else ""
+                        )
+                        warnings.append(
+                            f"Applied per-page Tesseract OCR to {len(ocr_pages_processed)} {kind} PDF page(s){conf_note}."
+                        )
+                    if empty_ocr_pages:
+                        ocr_required = True
+                        warnings.append(
+                            f"OCR yielded minimal text on sparse page(s): {', '.join(str(p) for p in empty_ocr_pages[:10])}."
+                        )
+                except Exception as exc:
                     ocr_required = True
-                    warnings.append("PDF appears scanned and OCR yielded minimal text.")
-            except Exception as exc:
-                ocr_required = True
-                warnings.append(f"Scanned PDF detected; Tesseract OCR unavailable in current runtime ({exc}).")
-        return raw_text, ocr_required, ocr_applied, page_count, warnings
+                    warnings.append(
+                        f"Detected {len(plan['scannedPagesDetected'])} scanned/sparse PDF page(s) (<{MIN_DIGITAL_CHARS_PER_PAGE} chars); "
+                        f"Tesseract OCR unavailable in current runtime ({exc})."
+                    )
+
+            raw_text = "\n\n".join(p for p in pages_text if p).strip()
+            return raw_text, ocr_required, ocr_applied, page_count, ocr_summary, warnings
+        finally:
+            try:
+                doc.close()
+            except Exception:
+                pass
     except ValueError:
         raise
     except ImportError:
         warnings.append("PyMuPDF not installed in current runtime; plain-stream fallback used.")
-        return data.decode("utf-8", errors="ignore").strip(), True, False, 0, warnings
+        return data.decode("utf-8", errors="ignore").strip(), True, False, 0, ocr_summary, warnings
 
 
 def _extract_doc_legacy(data: bytes) -> Tuple[str, List[str]]:
@@ -270,10 +392,11 @@ def parse_document_bytes(data: bytes, filename: str, content_type: str = "") -> 
     ocr_required = False
     ocr_applied = False
     page_count = 0
+    ocr_summary: Dict[str, Any] | None = None
     raw_text = ""
 
     if fmt == "pdf":
-        raw_text, ocr_required, ocr_applied, page_count, warnings = _extract_pdf_with_ocr_fallback(data)
+        raw_text, ocr_required, ocr_applied, page_count, ocr_summary, warnings = _extract_pdf_with_ocr_fallback(data)
     elif fmt == "docx":
         try:
             import docx
@@ -302,6 +425,7 @@ def parse_document_bytes(data: bytes, filename: str, content_type: str = "") -> 
         ocr_required=ocr_required,
         ocr_applied=ocr_applied,
         page_count=page_count,
+        ocr_summary=ocr_summary,
         warnings=warnings,
     )
 
@@ -312,6 +436,7 @@ def parse_raw_text(
     ocr_required: bool = False,
     ocr_applied: bool = False,
     page_count: int = 0,
+    ocr_summary: Dict[str, Any] | None = None,
     warnings: List[str] | None = None,
 ) -> Dict[str, Any]:
     sections, references = segment_sections(raw_text)
@@ -324,6 +449,7 @@ def parse_raw_text(
         "pageCount": page_count,
         "ocrApplied": ocr_applied,
         "ocrRequired": ocr_required,
+        "ocrSummary": ocr_summary,
         "tableCount": len(tables),
         "figureCount": len(figures),
         "equationCount": len(equations),

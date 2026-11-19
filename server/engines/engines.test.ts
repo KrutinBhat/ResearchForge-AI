@@ -2,14 +2,24 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import JSZip from 'jszip';
 import {
+  chunkDocumentText,
+  evaluatePdfPageOcrPlan,
+  extractEquations,
   parseRawText,
   stripLatexMarkup,
   validateFileSignature,
-  chunkDocumentText,
 } from './documentParser';
 import { analyzeTextSimilarity, BUILTIN_REFERENCE_CORPUS } from './similarityEngine';
 import { analyzeWritingPatterns, evaluateExperimentalClassifier } from './writingAnalyzer';
-import { checkClaimToSourceRelevance } from './citationEngine';
+import {
+  checkClaimToSourceRelevance,
+  escapeBibtexValue,
+  evaluateBibtexEntryAgainstCandidate,
+  exportBibtexCollection,
+  generateCitationKey,
+  parseBibtexEntries,
+  validateBibtexSyntax,
+} from './citationEngine';
 import {
   analyzeFileSet,
   isSafeArchivePath,
@@ -198,7 +208,209 @@ test('exportEngine produces real two-column IEEE DOCX/PDF and single-column APA 
 
   const ieeePdf = generatePdfBuffer({ title: 'IEEE Study', sections, references: refs, style: 'IEEE' });
   assert.equal(ieeePdf.subarray(0, 5).toString('utf8'), '%PDF-');
+  assert.ok(ieeePdf.toString('latin1').includes('/Type /Page'));
+  assert.ok(ieeePdf.toString('latin1').includes('IEEE Study'));
 
   const apaPdf = generatePdfBuffer({ title: 'APA Study', sections, references: refs, style: 'APA' });
   assert.equal(apaPdf.subarray(0, 5).toString('utf8'), '%PDF-');
+  assert.ok(apaPdf.toString('latin1').includes('APA Study'));
+});
+
+test('auth security enforces Firebase aud/iss/exp/uid claims and blocks weak secrets or demo in production', async () => {
+  const { validateFirebaseDecodedClaims, isDemoAllowed, getJwtSecret, requireAuth } = await import(
+    '../../src/middleware/auth.ts'
+  );
+  const nowSec = Math.floor(Date.now() / 1000);
+  const pid = 'rf-test-proj';
+  const validClaims = {
+    uid: 'uid_123',
+    sub: 'uid_123',
+    aud: pid,
+    iss: `https://securetoken.google.com/${pid}`,
+    exp: nowSec + 600,
+    email: 'author@uni.edu',
+  };
+
+  assert.equal(validateFirebaseDecodedClaims(validClaims, pid)?.uid, 'uid_123');
+  assert.equal(validateFirebaseDecodedClaims({ ...validClaims, exp: nowSec - 10 }, pid), null);
+  assert.equal(validateFirebaseDecodedClaims({ ...validClaims, aud: 'other-proj' }, pid), null);
+  assert.equal(
+    validateFirebaseDecodedClaims({ ...validClaims, iss: 'https://securetoken.google.com/other-proj' }, pid),
+    null
+  );
+  assert.equal(validateFirebaseDecodedClaims({ ...validClaims, sub: 'different_uid' }, pid), null);
+
+  const prevEnv = process.env.NODE_ENV;
+  const prevJwt = process.env.JWT_SECRET;
+  try {
+    process.env.NODE_ENV = 'production';
+    assert.equal(isDemoAllowed(), false);
+    process.env.JWT_SECRET = 'short-secret';
+    assert.throws(() => getJwtSecret());
+    process.env.JWT_SECRET = 'change-me-still-insecure-even-if-long-enough-string';
+    assert.throws(() => getJwtSecret());
+    process.env.JWT_SECRET = '9f7e3c2a1b8d4e6f0a2c4e6813579bdf2468ace013579bdf';
+    assert.equal(getJwtSecret().length >= 32, true);
+  } finally {
+    process.env.NODE_ENV = prevEnv;
+    process.env.JWT_SECRET = prevJwt;
+  }
+
+  let statusCode = 0;
+  let body: any = null;
+  let nextCalled = false;
+  const mockRes: any = {
+    status(code: number) {
+      statusCode = code;
+      return this;
+    },
+    json(payload: any) {
+      body = payload;
+      return this;
+    },
+  };
+  await requireAuth({ headers: {} } as any, mockRes, () => {
+    nextCalled = true;
+  });
+  assert.equal(nextCalled, false);
+  assert.equal(statusCode, 401);
+  assert.ok(String(body?.error || '').includes('Unauthorized'));
+});
+
+test('pgvector 384-d embedding generator produces normalized unit vectors with cosine discrimination', async () => {
+  const { computeNormalizedChunkVector384 } = await import('../../src/db/queries.ts');
+  const v1 = computeNormalizedChunkVector384('Federated learning optimization over distributed edge neural networks');
+  const v2 = computeNormalizedChunkVector384('Distributed edge neural networks trained using federated optimization');
+  const v3 = computeNormalizedChunkVector384('Archaeological stratigraphy and ceramic pottery chronology');
+
+  assert.equal(v1.length, 384);
+  const norm = Math.sqrt(v1.reduce((acc, x) => acc + x * x, 0));
+  assert.ok(Math.abs(norm - 1.0) < 0.01);
+
+  const cosine = (a: number[], b: number[]) => a.reduce((acc, x, i) => acc + x * b[i], 0);
+  assert.ok(cosine(v1, v2) > 0.7);
+  assert.ok(cosine(v1, v3) < 0.25);
+});
+
+test('mixed PDF OCR planner detects sparse (<50 char) pages and enforces 30-page OCR cap', () => {
+  const pageCharCounts = [120, ...Array(34).fill(3)];
+  const plan = evaluatePdfPageOcrPlan(pageCharCounts);
+  assert.equal(plan.digitalPageCount, 1);
+  assert.equal(plan.isMixedPdf, true);
+  assert.equal(plan.scannedPagesDetected.length, 34);
+  assert.equal(plan.pagesToOcr.length, 30);
+  assert.equal(plan.skippedPagesDueToLimit.length, 4);
+  assert.equal(extractEquations('Loss is $L = a + b$.').length, 1);
+});
+
+test('BibTeX exporter escapes LaTeX, resolves key collisions, validates syntax, and defaults verified-only', () => {
+  assert.ok(escapeBibtexValue('Security & Privacy 100%').includes('\\&'));
+  assert.ok(escapeBibtexValue('Security & Privacy 100%').includes('\\%'));
+
+  const keys = new Set<string>();
+  assert.equal(generateCitationKey(['A. Vaswani'], 2017, 'Attention Is All You Need', keys), 'vaswani2017attention');
+  assert.equal(generateCitationKey(['A. Vaswani'], 2017, 'Attention Is All You Need', keys), 'vaswani2017attentiona');
+
+  const sampleCitations = [
+    {
+      id: 'cit_1',
+      rawReference: '[1] A. Vaswani et al., "Attention Is All You Need," NeurIPS, 2017.',
+      status: 'Verified',
+      bibliographicStatus: 'Bibliographic metadata verified',
+      verifiedMetadata: {
+        title: 'Attention Is All You Need',
+        authors: ['Ashish Vaswani', 'Noam Shazeer'],
+        year: 2017,
+        venue: 'Advances in Neural Information Processing Systems',
+        pages: '5998-6008',
+        doi: '10.5555/3295222.3295349',
+        entryType: 'inproceedings',
+      },
+    },
+    {
+      id: 'cit_2',
+      rawReference: '[2] Missing Paper, 2099.',
+      status: 'Unverified',
+      bibliographicStatus: 'Verification unavailable',
+      verifiedMetadata: null,
+    },
+  ];
+
+  const verifiedOnly = exportBibtexCollection(sampleCitations, false);
+  assert.equal(verifiedOnly.includedCount, 1);
+  assert.equal(verifiedOnly.skippedCount, 1);
+  assert.equal(verifiedOnly.validation.valid, true);
+  assert.ok(verifiedOnly.bibtex.includes('@inproceedings{vaswani2017attention,'));
+
+  const includeAll = exportBibtexCollection(sampleCitations, true);
+  assert.equal(includeAll.includedCount, 2);
+  assert.equal(includeAll.skippedCount, 0);
+  assert.equal(includeAll.validation.valid, true);
+  assert.ok(includeAll.bibtex.includes('% WARNING:'));
+
+  assert.equal(validateBibtexSyntax('@article{bad,\n  title = {missing brace').valid, false);
+});
+
+test('Firebase SA resolver and ENABLE_DEMO_WORKSPACE=false guard enforce strict prod config', async () => {
+  const { resolveServiceAccount } = await import('../../src/lib/firebase-admin.ts');
+  const { isDemoAllowed } = await import('../../src/middleware/auth.ts');
+
+  const sa = {
+    type: 'service_account',
+    project_id: 'rf-prod',
+    client_email: 'admin@rf-prod.iam.gserviceaccount.com',
+    private_key: '-----BEGIN PRIVATE KEY-----\nTEST\n-----END PRIVATE KEY-----\n',
+  };
+  assert.equal((resolveServiceAccount(JSON.stringify(sa)) as Record<string, any> | null)?.project_id, 'rf-prod');
+  const b64 = Buffer.from(JSON.stringify(sa), 'utf8').toString('base64');
+  assert.equal((resolveServiceAccount(b64) as Record<string, any> | null)?.client_email, sa.client_email);
+  const wrappedB64 = `"${b64.slice(0, 32)}\n  ${b64.slice(32)}"`;
+  assert.equal((resolveServiceAccount(wrappedB64) as Record<string, any> | null)?.project_id, 'rf-prod');
+  const doubleEscaped = JSON.stringify({ ...sa, private_key: 'lineA\\nlineB' });
+  const parsedEsc = resolveServiceAccount(doubleEscaped) as Record<string, any> | null;
+  assert.ok(parsedEsc?.privateKey || parsedEsc?.private_key);
+  assert.ok(String(parsedEsc?.private_key || '').includes('\n'));
+  assert.equal(resolveServiceAccount(''), null);
+
+  const prevDemo = process.env.ENABLE_DEMO_WORKSPACE;
+  const prevNodeEnv = process.env.NODE_ENV;
+  try {
+    process.env.NODE_ENV = 'development';
+    process.env.ENABLE_DEMO_WORKSPACE = 'false';
+    assert.equal(isDemoAllowed(), false);
+  } finally {
+    process.env.ENABLE_DEMO_WORKSPACE = prevDemo;
+    process.env.NODE_ENV = prevNodeEnv;
+  }
+});
+
+test('BibTeX parser and Crossref discrepancy evaluator detect field mismatches', () => {
+  const raw = `@inproceedings{he2016deep,
+  author = {Kaiming He and Xiangyu Zhang and Shaoqing Ren and Jian Sun},
+  title = {{Deep} Residual Learning for Image Recognition},
+  booktitle = {CVPR},
+  year = {2018},
+  doi = {10.1109/CVPR.2016.90}
+}`;
+  const entries = parseBibtexEntries(raw);
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].citeKey, 'he2016deep');
+  assert.equal(entries[0].title, 'Deep Residual Learning for Image Recognition');
+  assert.equal(entries[0].authors.length, 4);
+
+  const audited = evaluateBibtexEntryAgainstCandidate(entries[0], {
+    provider: 'Crossref',
+    title: 'Deep Residual Learning for Image Recognition',
+    authors: ['Kaiming He', 'Xiangyu Zhang', 'Shaoqing Ren', 'Jian Sun'],
+    year: 2016,
+    venue: 'Proceedings of CVPR',
+    doi: '10.1109/CVPR.2016.90',
+    url: 'https://doi.org/10.1109/CVPR.2016.90',
+    entryType: 'inproceedings',
+  });
+  assert.equal(audited.status, 'Needs review');
+  assert.equal(audited.yearMatched, false);
+  assert.equal(audited.doiMatched, true);
+  assert.equal(audited.authorMatched, true);
+  assert.ok(audited.discrepancies.some((d) => d.field === 'year'));
 });

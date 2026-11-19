@@ -1,4 +1,4 @@
-from typing import List, Literal, Optional
+from typing import Any, List, Literal, Optional
 from pydantic import BaseModel, EmailStr, Field
 
 
@@ -7,7 +7,6 @@ class RegisterRequest(BaseModel):
     password: str = Field(min_length=8, max_length=128)
     name: str = Field(min_length=2, max_length=120)
     institution: str = Field(default="", max_length=200)
-    role: str = Field(default="Researcher", max_length=64)
 
 
 class LoginRequest(BaseModel):
@@ -39,7 +38,6 @@ class TokenResponse(BaseModel):
 class SettingsUpdateRequest(BaseModel):
     name: Optional[str] = Field(default=None, min_length=2, max_length=120)
     institution: Optional[str] = Field(default=None, max_length=200)
-    role: Optional[str] = Field(default=None, max_length=64)
     consentAnalytics: Optional[bool] = None
     consentRetention: Optional[bool] = None
 
@@ -87,6 +85,7 @@ class GeneratePaperRequest(BaseModel):
     experimentalResults: str = ""
     literatureNotes: str = ""
     citationStyle: Literal["IEEE", "APA"] = "IEEE"
+    paperFormat: Optional[Literal["IEEE", "APA"]] = None
     engineMode: Literal["gemini", "local"] = "gemini"
 
 
@@ -95,6 +94,7 @@ class SimilarityAnalyzeRequest(BaseModel):
     text: Optional[str] = None
     title: str = "Ad-hoc Similarity Scan"
     queryArxiv: bool = True
+    asyncJob: bool = False
 
 
 class WritingAnalyzeRequest(BaseModel):
@@ -108,6 +108,18 @@ class CitationVerifyRequest(BaseModel):
     referencesText: Optional[str] = None
     claimText: Optional[str] = None
     sourceTitle: Optional[str] = None
+    asyncJob: bool = False
+
+
+class CitationBibtexExportRequest(BaseModel):
+    documentId: Optional[str] = None
+    citations: Optional[List[Any]] = None
+    includeUnverified: bool = False
+
+
+class CitationBibtexVerifyRequest(BaseModel):
+    bibtexText: str = Field(min_length=5, max_length=250000)
+    includeUnverified: bool = False
 
 
 class QualityEvaluateRequest(BaseModel):
@@ -131,9 +143,10 @@ class RefinementStartRequest(BaseModel):
         "Formal Research Style",
         "Readability Improvement",
     ] = "Academic Clarity"
-    scope: Literal["whole_paper", "selected_sections", "single_paragraph"] = "whole_paper"
+    scope: Literal["whole_paper", "selected_sections", "selected_paragraphs", "single_paragraph"] = "whole_paper"
     sectionIds: Optional[List[str]] = None
     paragraphIndex: Optional[int] = None
+    paragraphText: Optional[str] = None
     preserveTerms: str = ""
     engineMode: Literal["gemini", "local"] = "gemini"
 

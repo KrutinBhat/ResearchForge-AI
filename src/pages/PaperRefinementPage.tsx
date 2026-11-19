@@ -1,8 +1,8 @@
 import React, { useEffect, useState } from 'react';
-import { Upload, Sparkles, CheckCircle2, Download, AlertTriangle, FileUp } from 'lucide-react';
+import { Upload, Sparkles, CheckCircle2, Download, AlertTriangle, FileUp, RotateCcw } from 'lucide-react';
 import { WorkspaceLayout } from '../components/WorkspaceLayout';
 import { StatusLabel } from '../components/StatusLabel';
-import { apiDownload, apiFetch } from '../lib/api';
+import { apiDownload, apiFetch, apiUploadWithProgress } from '../lib/api';
 
 interface Section {
   id: string;
@@ -100,11 +100,14 @@ export function PaperRefinementPage() {
   // Drag & drop upload state
   const [dragActive, setDragActive] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [uploadPercent, setUploadPercent] = useState<number | null>(null);
   const [uploadNotice, setUploadNotice] = useState('');
 
-  // Job polling state
+  // Job polling & user-controlled diff state
   const [job, setJob] = useState<RefinementJobResponse | null>(null);
   const [activeDiffIdx, setActiveDiffIdx] = useState(0);
+  const [sectionAccepted, setSectionAccepted] = useState<Record<string, boolean>>({});
+  const [editingRefined, setEditingRefined] = useState(false);
   const [approving, setApproving] = useState(false);
   const [approvedBanner, setApprovedBanner] = useState('');
   const [error, setError] = useState('');
@@ -139,13 +142,14 @@ export function PaperRefinementPage() {
     setError('');
     setUploadNotice('');
     setUploading(true);
+    setUploadPercent(0);
     try {
       const fd = new FormData();
       fd.append('file', file);
-      const res = await apiFetch<{
+      const res = await apiUploadWithProgress<{
         document: { id: string; title: string; format: string; word_count: number };
         parseMeta: { ocrRequired: boolean; warnings: string[]; citationsFound: string[]; equationsFound: string[] };
-      }>('/api/documents/upload', { method: 'POST', body: fd });
+      }>('/api/documents/upload', fd, (pct) => setUploadPercent(pct));
 
       setUploadNotice(
         `Parsed ${res.document.format.toUpperCase()} (${res.document.word_count} words · ${res.parseMeta.citationsFound.length} citations · ${res.parseMeta.equationsFound.length} equations detected).${
@@ -157,6 +161,7 @@ export function PaperRefinementPage() {
       setError(err.message);
     } finally {
       setUploading(false);
+      setUploadPercent(null);
     }
   };
 
@@ -178,6 +183,12 @@ export function PaperRefinementPage() {
       setError('Refinement job was cancelled.');
     } else {
       setActiveDiffIdx(0);
+      const initialAccepted: Record<string, boolean> = {};
+      status.refinedSections.forEach((sec) => {
+        initialAccepted[sec.id] = true;
+      });
+      setSectionAccepted(initialAccepted);
+      setEditingRefined(false);
     }
   };
 
@@ -217,15 +228,48 @@ export function PaperRefinementPage() {
     await pollJob(job.id);
   };
 
+  const handleEditRefinedContent = (sectionId: string, nextContent: string) => {
+    setJob((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        refinedSections: prev.refinedSections.map((s) => (s.id === sectionId ? { ...s, content: nextContent } : s)),
+      };
+    });
+    setSectionAccepted((prev) => ({ ...prev, [sectionId]: true }));
+  };
+
+  const handleRevertSection = (sectionId: string) => {
+    if (!job) return;
+    const orig = job.originalSections.find((s) => s.id === sectionId);
+    if (!orig) return;
+    setJob((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        refinedSections: prev.refinedSections.map((s) => (s.id === sectionId ? { ...s, content: orig.content } : s)),
+      };
+    });
+    setSectionAccepted((prev) => ({ ...prev, [sectionId]: false }));
+  };
+
   const handleApproveRevision = async () => {
     if (!job) return;
     setApproving(true);
     try {
+      const mergedSections = job.refinedSections.map((sec, idx) => {
+        const isAccepted = sectionAccepted[sec.id] ?? true;
+        if (isAccepted) return sec;
+        return job.originalSections[idx] ?? sec;
+      });
+      const acceptedCount = mergedSections.filter((s, idx) => (sectionAccepted[s.id] ?? true) && s.content !== job.originalSections[idx]?.content).length;
       const res = await apiFetch<{ versionNumber: number }>(`/api/paper-refinement/approve/${job.id}`, {
         method: 'POST',
-        body: JSON.stringify({ approvedSections: job.refinedSections }),
+        body: JSON.stringify({ approvedSections: mergedSections }),
       });
-      setApprovedBanner(`Approved & saved as Revision v${res.versionNumber}.`);
+      setApprovedBanner(
+        `Approved & saved as Revision v${res.versionNumber} (${acceptedCount} refined section change(s) applied).`
+      );
       await handleDocumentSelect(job.documentId);
     } catch (err: any) {
       setError(err.message);
@@ -305,8 +349,20 @@ export function PaperRefinementPage() {
           >
             <FileUp className="w-7 h-7 text-blue-800 mx-auto mb-2" aria-hidden="true" />
             <div className="font-display text-sm font-semibold text-slate-900">
-              {uploading ? 'Extracting manuscript...' : 'Drop existing research paper here'}
+              {uploading
+                ? uploadPercent !== null && uploadPercent < 100
+                  ? `Uploading manuscript (${uploadPercent}%)...`
+                  : 'Extracting text, equations & citations...'
+                : 'Drop existing research paper here'}
             </div>
+            {uploading && uploadPercent !== null && (
+              <div className="w-full max-w-xs mx-auto h-1.5 bg-slate-200 rounded-full overflow-hidden my-2">
+                <div
+                  className="h-full bg-blue-700 transition-all duration-150"
+                  style={{ width: `${uploadPercent}%` }}
+                />
+              </div>
+            )}
             <p className="text-xs text-slate-500 mt-1 mb-4">
               Supported: PDF · DOCX · DOC · TXT · RTF · Markdown · LaTeX (.tex)
             </p>
@@ -609,21 +665,60 @@ export function PaperRefinementPage() {
               <p className="text-sm text-slate-700 leading-relaxed whitespace-pre-wrap">{activeOrig.content}</p>
             </div>
             <div className="p-6 bg-blue-50/20">
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-xs font-semibold text-blue-900">Refined ({activeRef.heading})</span>
-                <span className="text-[11px] text-slate-500">Modified vocabulary highlighted</span>
+              <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+                <div className="flex items-center gap-3">
+                  <span className="text-xs font-semibold text-blue-900">Refined ({activeRef.heading})</span>
+                  <label className="inline-flex items-center gap-1.5 text-xs text-slate-700 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={sectionAccepted[activeRef.id] ?? true}
+                      onChange={(e) =>
+                        setSectionAccepted((prev) => ({ ...prev, [activeRef.id]: e.target.checked }))
+                      }
+                      className="rounded border-slate-300 text-blue-800"
+                    />
+                    <span>{sectionAccepted[activeRef.id] ?? true ? 'Accept refinement' : 'Keep original'}</span>
+                  </label>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setEditingRefined((v) => !v)}
+                    className="px-2.5 py-1 text-[11px] font-medium text-slate-700 bg-white border border-slate-300 rounded-md hover:bg-slate-50"
+                  >
+                    {editingRefined ? 'View Highlighted Diff' : 'Edit Section'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleRevertSection(activeRef.id)}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium text-slate-700 bg-white border border-slate-300 rounded-md hover:bg-slate-50"
+                  >
+                    <RotateCcw className="w-3 h-3" aria-hidden="true" />
+                    <span>Revert</span>
+                  </button>
+                </div>
               </div>
-              <p className="text-sm text-slate-900 leading-relaxed whitespace-pre-wrap">
-                {computeWordDiff(activeOrig.content, activeRef.content).map((part, idx) =>
-                  part.type === 'added' ? (
-                    <mark key={idx} className="bg-blue-100 text-blue-950 px-0.5 rounded">
-                      {part.text}
-                    </mark>
-                  ) : (
-                    <span key={idx}>{part.text}</span>
-                  )
-                )}
-              </p>
+              {editingRefined ? (
+                <textarea
+                  aria-label={`Edit refined content for ${activeRef.heading}`}
+                  rows={10}
+                  value={activeRef.content}
+                  onChange={(e) => handleEditRefinedContent(activeRef.id, e.target.value)}
+                  className="w-full p-3 text-sm text-slate-900 leading-relaxed border border-blue-300 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-blue-700"
+                />
+              ) : (
+                <p className="text-sm text-slate-900 leading-relaxed whitespace-pre-wrap">
+                  {computeWordDiff(activeOrig.content, activeRef.content).map((part, idx) =>
+                    part.type === 'added' ? (
+                      <mark key={idx} className="bg-blue-100 text-blue-950 px-0.5 rounded">
+                        {part.text}
+                      </mark>
+                    ) : (
+                      <span key={idx}>{part.text}</span>
+                    )
+                  )}
+                </p>
+              )}
             </div>
           </div>
 

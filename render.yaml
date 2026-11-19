@@ -5,12 +5,22 @@ services:
     dockerfilePath: ./Dockerfile
     plan: starter
     region: singapore
-    healthCheckPath: /api/health
+    healthCheckPath: /api/ready
     envVars:
       - key: ENVIRONMENT
         value: production
       - key: ENABLE_DEMO_WORKSPACE
         value: "false"
+      - key: FIREBASE_PROJECT_ID
+        sync: false
+      - key: FIREBASE_SERVICE_ACCOUNT_JSON
+        sync: false
+      - key: FIREBASE_CHECK_REVOKED
+        value: "false"
+      - key: AUTH_RATE_LIMIT_PER_MINUTE
+        value: "30"
+      - key: CORS_ORIGINS
+        sync: false
       - key: PORT
         value: "8000"
       - key: JWT_SECRET
@@ -51,6 +61,16 @@ services:
     envVars:
       - key: ENVIRONMENT
         value: production
+      - key: ENABLE_DEMO_WORKSPACE
+        value: "false"
+      - key: FIREBASE_PROJECT_ID
+        sync: false
+      - key: FIREBASE_SERVICE_ACCOUNT_JSON
+        sync: false
+      - key: FIREBASE_CHECK_REVOKED
+        value: "false"
+      - key: JWT_SECRET
+        sync: false
       - key: GEMINI_API_KEY
         sync: false
       - key: SQL_HOST

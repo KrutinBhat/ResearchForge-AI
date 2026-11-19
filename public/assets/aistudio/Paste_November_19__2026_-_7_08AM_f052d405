@@ -1,0 +1,901 @@
+RESEARCHFORGE AI — FINAL PRODUCTION HARDENING & ENGINEERING UPGRADE
+
+Act as a principal software architect, senior full-stack engineer, AI/ML engineer, application security specialist, QA automation engineer, and DevOps engineer.
+
+Perform a complete engineering audit and upgrade of the existing ResearchForge AI repository into a secure, reliable, production-deployable academic research intelligence platform.
+
+PRIMARY OBJECTIVE
+
+Do not simply redesign the application or add unnecessary features. Thoroughly inspect the existing codebase, identify actual weaknesses, and implement the necessary upgrades.
+
+Preserve the existing 9-module architecture, polished UI/UX, working functionality, and design identity wherever possible. Do not remove features to simplify the implementation.
+
+Prioritize correctness, security, AI accuracy, reliability, maintainability, real functionality, and production readiness over superficial changes.
+
+---
+
+1. ARCHITECTURE CONSOLIDATION
+
+Establish FastAPI as the single authoritative backend.
+
+- Remove the duplicated full Express/TypeScript backend architecture.
+- Keep Node/Express only if genuinely required as a lightweight adapter or development preview layer.
+- Ensure frontend API calls resolve consistently to the FastAPI backend.
+- Eliminate duplicate implementations, conflicting business logic, and inconsistent API responses.
+- Establish clear service, repository, schema, model, and route separation.
+- Implement consistent Pydantic validation and typed contracts.
+- Add API versioning where appropriate.
+- Standardize error responses, logging, request IDs, and API response structures.
+- Avoid circular imports and oversized route files.
+- Ensure all modules use the same authentication, authorization, database, task, and configuration infrastructure.
+
+Do not perform a blind rewrite. Refactor progressively and preserve working code.
+
+---
+
+2. FIREBASE AUTHENTICATION — COMPLETE SECURITY & CORRECTNESS AUDIT
+
+Treat Firebase Authentication as a critical security boundary.
+
+Audit and strengthen the complete authentication lifecycle:
+
+Authentication
+
+- Verify Firebase ID tokens exclusively on the backend using the official Firebase Admin SDK.
+- Correctly validate signature, issuer, audience, expiration, subject, and token integrity.
+- Reject expired, invalid, malformed, revoked, and incorrectly scoped tokens.
+- Never trust user IDs, email addresses, roles, or account information supplied directly by the frontend.
+- Use the verified Firebase UID as the authoritative user identity.
+- Handle token expiration and frontend refresh correctly.
+- Prevent expired tokens from silently continuing to access protected endpoints.
+- Ensure logout, session expiration, account deletion, and revoked-token behavior are handled correctly.
+
+Authorization
+
+- Implement centralized authentication and authorization dependencies/middleware.
+- Verify ownership of every user-specific project, document, report, job, citation, and uploaded file.
+- Prevent IDOR, cross-user access, privilege escalation, and unauthorized resource enumeration.
+- Ensure demo accounts cannot access or modify real user data.
+- Implement administrator permissions only where required and never trust client-supplied role values.
+
+Firebase configuration
+
+- Validate Firebase project configuration and backend credentials.
+- Never expose service-account private keys, Firebase Admin credentials, JWT secrets, or backend secrets in frontend code.
+- Do not commit credentials or expose them in logs.
+- Make authentication failures return appropriate HTTP status codes.
+- Ensure development, testing, staging, and production configurations are isolated.
+
+Firebase security testing
+
+Create automated tests for:
+
+- Valid Firebase token
+- Invalid token
+- Expired token
+- Missing token
+- Revoked token where supported
+- Incorrect Firebase audience or issuer
+- Malformed bearer token
+- User A attempting to access User B's resources
+- Unauthorized modification and deletion
+- Demo account attempting privileged actions
+
+Do not declare Firebase integration secure until these tests pass.
+
+---
+
+3. COMPLETE SECURITY HARDENING
+
+Conduct a security audit across the entire application.
+
+API and backend security
+
+- Input validation and sanitization.
+- SQL injection prevention.
+- XSS prevention.
+- CSRF protection where applicable.
+- SSRF prevention.
+- IDOR prevention.
+- Secure CORS configuration.
+- Rate limiting on sensitive endpoints.
+- Authentication brute-force protection.
+- Request size and timeout limits.
+- Security headers.
+- Safe error handling without exposing stack traces or secrets.
+- Secure cookie and token handling.
+- Dependency vulnerability assessment.
+
+File and document security
+
+Secure all file upload and processing workflows.
+
+- Validate file extensions, MIME types, file signatures, and actual content.
+- Reject mismatched file types.
+- Enforce file size, page count, archive size, extraction depth, and processing limits.
+- Protect against malicious PDFs, malformed DOCX files, ZIP bombs, path traversal, ZIP slip, and decompression attacks.
+- Prevent arbitrary file system access.
+- Use safe temporary storage and cleanup.
+- Restrict access to uploaded files to their authenticated owner.
+- Avoid executing uploaded code.
+- Handle corrupted files without crashing workers or the API.
+
+Secrets and configuration
+
+- Remove hardcoded secrets and insecure defaults.
+- Require strong production secrets.
+- Validate production configuration during startup.
+- Fail closed when essential security settings are missing.
+- Prevent accidental debug mode in production.
+- Ensure ".env", database files, WAL files, SHM files, uploaded documents, credentials, and private artifacts are ignored by Git.
+
+Create a security checklist and resolve identified issues instead of merely documenting them.
+
+---
+
+4. AI/ML ENGINE ACCURACY AND RELIABILITY
+
+Audit every AI feature to determine whether it is genuinely implemented, partially implemented, heuristic, or merely simulated.
+
+Never fabricate AI results, confidence scores, citations, datasets, model performance, or completed analyses.
+
+Similarity and plagiarism engine
+
+Upgrade the system to use a robust multi-stage pipeline:
+
+1. Text normalization and segmentation.
+2. Exact matching and fingerprinting.
+3. Fuzzy matching.
+4. TF-IDF retrieval.
+5. BM25 retrieval.
+6. Embedding-based semantic similarity.
+7. Candidate retrieval.
+8. Passage-level comparison.
+9. Similarity ranking.
+10. Evidence-backed reporting.
+
+Ensure embeddings are actually generated, stored, retrieved, and reused instead of recomputed unnecessarily.
+
+Use a reliable embedding model and validate model availability. Provide a safe fallback when embedding models cannot load.
+
+Implement:
+
+- Chunk-level similarity
+- Sentence-level matching
+- Paragraph-level similarity
+- Source passage comparison
+- Duplicate detection
+- Explainable match results
+- Source attribution where available
+
+Clearly distinguish:
+
+- Exact overlap
+- Near-duplicate overlap
+- Semantic similarity
+- Common terminology
+- Properly cited similarity
+- Unattributed similarity
+
+Do not claim to be equivalent to Turnitin, iThenticate, or proprietary institutional plagiarism databases.
+
+AI writing pattern analyzer
+
+Improve statistical and ML quality.
+
+- Validate the training dataset.
+- Avoid leakage between training and test data.
+- Use group-based or topic-based separation where appropriate.
+- Document dataset provenance and limitations.
+- Evaluate class balance.
+- Report precision, recall, F1, ROC-AUC where appropriate, and confusion matrices.
+- Validate calibration and threshold selection.
+- Test on unseen domains and different writing styles.
+- Implement reproducible evaluation.
+
+Do not treat the output as definitive proof that a document was written by AI or a human.
+
+Use language such as:
+
+- AI-like linguistic patterns detected
+- Human-like variation observed
+- Mixed or inconclusive patterns
+- Insufficient evidence
+
+Never label authorship with certainty.
+
+Citation intelligence
+
+Improve citation verification using authoritative scholarly sources when available, such as Crossref, OpenAlex, Semantic Scholar, and arXiv.
+
+For every citation, independently verify:
+
+- DOI validity
+- Title
+- Authors
+- Publication venue
+- Publication year
+- Metadata consistency
+- URL resolution
+- Retrievable source availability
+
+For claim-support analysis, distinguish:
+
+- Metadata verified
+- Claim supported by retrieved evidence
+- Claim partially supported
+- Claim contradicted by retrieved evidence
+- Insufficient evidence
+- Source unavailable
+- Not evaluated
+
+Do not invent references or pretend to retrieve unavailable publications.
+
+Implement API timeout handling, rate limiting, retries, caching, source attribution, and graceful degradation when external scholarly APIs are unavailable.
+
+Research quality evaluator
+
+Improve the evaluator so that its assessment is evidence-based.
+
+Evaluate relevant dimensions such as:
+
+- Research question
+- Novelty
+- Related work
+- Methodology
+- Dataset quality
+- Experimental design
+- Baseline comparison
+- Statistical validity
+- Results interpretation
+- Reproducibility
+- Limitations
+- Ethical considerations
+- Citation quality
+
+Avoid arbitrary scores without explanation.
+
+Every assessment should provide:
+
+- Finding
+- Evidence
+- Reasoning
+- Severity or importance
+- Recommendation
+- Confidence or evidence sufficiency
+
+Clearly differentiate automated evaluation from expert peer review.
+
+Technical project-to-paper analyzer
+
+Improve code analysis and evidence extraction.
+
+- Use AST-based analysis for supported languages.
+- Use structured extraction instead of regex-only analysis wherever possible.
+- Detect project architecture, dependencies, APIs, data pipelines, model usage, experiments, tests, and configuration.
+- Extract claims that can actually be supported by source code.
+- Map paper claims to code evidence where possible.
+- Identify unsupported claims and missing evidence.
+- Handle large repositories efficiently.
+- Support safe ZIP/repository processing.
+
+Do not claim runtime behavior, model performance, accuracy, or experimental results based solely on source code unless those results are verifiable.
+
+---
+
+5. RESEARCH PAPER GENERATOR — TECHNICAL ACCURACY
+
+Upgrade paper generation to create academically credible output.
+
+- Never invent experiments, results, dataset sizes, model metrics, references, or technical implementations.
+- Clearly identify missing information.
+- Separate verified project facts from generated explanatory content.
+- Preserve source evidence and traceability.
+- Support IEEE and APA formatting.
+- Maintain accurate section structure and citation mapping.
+- Ensure technical terminology is consistent.
+- Improve abstract, methodology, results, discussion, limitations, and conclusion quality.
+- Add checks for unsupported claims, citation mismatches, missing sections, and inconsistent values.
+- Make the generated paper editable before export.
+
+The paper must reflect the actual project rather than an imagined implementation.
+
+---
+
+6. HUMANIZATION & ACADEMIC REFINEMENT ENGINE
+
+Upgrade the document refinement engine into a reliable academic writing editor.
+
+Support:
+
+- PDF
+- DOCX
+- DOC
+- TXT
+- Markdown
+- RTF
+- LaTeX where supported
+
+Implement OCR properly for scanned documents and validate extraction quality.
+
+Provide modes:
+
+- Academic Clarity
+- Technical Precision
+- Concise Academic Writing
+- Readability Improvement
+- Formal Academic Tone
+- Grammar & Structure Refinement
+
+Preserve:
+
+- Technical meaning
+- Equations
+- Mathematical notation
+- Numbers
+- Experimental results
+- Citations
+- References
+- Acronyms
+- Technical terminology
+- Code snippets
+- Tables
+- Section structure
+
+Add:
+
+- Before-and-after comparison
+- Diff visualization
+- Paragraph-level refinement
+- Section-level refinement
+- Whole-document refinement
+- User-controlled changes
+- Undo/redo where practical
+- Accept/reject individual modifications
+- Meaning-preservation warnings
+- Document extraction quality warnings
+
+Never position this feature as a tool for bypassing AI detectors, plagiarism checks, or academic integrity systems.
+
+Its purpose is genuine clarity, readability, technical precision, and better academic communication.
+
+---
+
+7. DOCUMENT PARSING, OCR & EXPORT ENGINE
+
+Audit the complete document pipeline.
+
+Extraction
+
+- PDF text extraction
+- Scanned PDF OCR
+- DOCX parsing
+- DOC handling with a clearly supported conversion path
+- TXT
+- Markdown
+- RTF
+- LaTeX where implemented
+
+Improve:
+
+- Tables
+- Figures
+- Captions
+- References
+- Equations
+- Headers and footers
+- Page boundaries
+- Multi-column documents
+- Special characters
+- Unicode
+- Section hierarchy
+
+Use Tesseract OCR correctly and include its system dependencies in deployment environments.
+
+Detect extraction failures and notify users when content may be incomplete.
+
+Export
+
+Validate:
+
+- IEEE DOCX export
+- IEEE PDF export
+- APA DOCX export
+- APA PDF export
+
+Verify formatting in actual generated files.
+
+Check:
+
+- Margins
+- Column layout
+- Fonts
+- Heading hierarchy
+- Tables
+- Images
+- Captions
+- Citation formatting
+- References
+- Page breaks
+- Header/footer formatting
+
+Never mark export as successful merely because the file was created.
+
+---
+
+8. DATABASE AND DATA INTEGRITY
+
+Make PostgreSQL the authoritative production database.
+
+- SQLite may remain available for local development and isolated testing only.
+- Do not silently fall back to SQLite in production.
+- Use Alembic as the authoritative migration system.
+- Remove production reliance on "create_all()".
+- Validate migrations from a clean database.
+- Validate upgrades from existing V1 and V1.1 schemas.
+- Add proper foreign keys, indexes, constraints, and cascade rules.
+- Audit all ownership relationships.
+- Implement transaction boundaries correctly.
+- Prevent duplicate records and inconsistent job states.
+- Add pagination to large result sets.
+- Validate data retention and cleanup policies.
+
+Vector database
+
+Verify that pgvector is genuinely operational.
+
+- Validate extension installation.
+- Use actual vector column types where intended.
+- Validate embedding dimensions.
+- Implement vector indexes where appropriate.
+- Verify embedding persistence.
+- Verify similarity retrieval.
+- Verify chunk metadata.
+- Verify vector queries work in PostgreSQL.
+
+Do not claim pgvector integration merely because the extension is installed or listed in requirements.
+
+---
+
+9. BACKGROUND JOBS — DURABILITY & RECOVERY
+
+Make long-running analyses reliable.
+
+Use Celery and Redis consistently for:
+
+- Paper generation
+- Similarity analysis
+- Citation analysis
+- Quality audits
+- Project analysis
+- Document refinement
+- OCR-heavy tasks
+
+Implement:
+
+- Persistent job status
+- Queued
+- Running
+- Completed
+- Failed
+- Cancelled
+- Progress updates
+- Task retries
+- Retry limits
+- Exponential backoff
+- Timeouts
+- Cancellation
+- Failure reasons
+- Idempotency
+- Duplicate execution protection
+- Worker health checks
+- Task recovery
+
+Ensure retry endpoints actually enqueue durable jobs instead of bypassing Celery.
+
+Implement proper recovery for interrupted tasks. Do not merely mark every interrupted task failed if safe retry or recovery is possible.
+
+Ensure API requests do not remain blocked during lengthy document or AI processing.
+
+---
+
+10. FRONTEND & UI/UX
+
+Preserve the existing premium ResearchForge AI visual identity and current polished interface.
+
+Do not redesign the entire application unnecessarily.
+
+Improve:
+
+- Loading states
+- Skeletons
+- Empty states
+- Error states
+- API failure feedback
+- File upload progress
+- Job progress
+- Responsive layouts
+- Accessibility
+- Keyboard navigation
+- Form validation
+- Navigation consistency
+- Dashboard data consistency
+- Toast notifications
+- Confirmation dialogs
+- Retry actions
+
+Ensure every visible control works.
+
+Remove:
+
+- Fake progress
+- Static success messages
+- Fake AI results
+- Placeholder buttons
+- Mock metrics presented as real data
+- Dead navigation
+- Misleading charts
+
+Make the UI accurately represent actual backend state.
+
+---
+
+11. PRODUCTION DEPLOYMENT INFRASTRUCTURE
+
+Resolve all deployment blockers.
+
+Docker
+
+Create and validate the missing Dockerfile.
+
+It must:
+
+- Install required system dependencies.
+- Install Python dependencies correctly.
+- Install Tesseract OCR and required language packs.
+- Configure working directories.
+- Use appropriate non-root execution where practical.
+- Handle environment variables securely.
+- Expose the correct application port.
+- Include a health check.
+- Start the actual FastAPI backend correctly.
+
+Docker Compose
+
+Implement and validate a working local production-like environment with:
+
+- FastAPI API
+- PostgreSQL
+- Redis
+- Celery worker
+- Required shared configuration
+
+Ensure services have health checks and proper dependencies.
+
+Render
+
+Correct the Render configuration.
+
+Ensure:
+
+- Docker build works.
+- Environment variables are configured correctly.
+- PostgreSQL is properly connected.
+- Redis/Celery configuration is valid.
+- Worker deployment is configured.
+- Health checks function.
+- Production startup succeeds.
+
+Vercel
+
+Correct frontend deployment configuration.
+
+- Validate API rewrites.
+- Avoid hardcoded backend URLs.
+- Use environment-based configuration.
+- Validate authentication behavior across frontend and backend domains.
+- Verify CORS and Firebase token forwarding.
+- Ensure build and deployment settings are correct.
+
+Provide a verified deployment procedure rather than speculative deployment instructions.
+
+---
+
+12. PERFORMANCE, SCALABILITY & COST
+
+Optimize the application for realistic student/researcher usage and future SaaS scaling.
+
+- Avoid loading entire repositories or documents into memory unnecessarily.
+- Optimize document processing.
+- Use pagination.
+- Cache scholarly API responses.
+- Cache embeddings when safe.
+- Use database indexes.
+- Optimize vector retrieval.
+- Implement sensible concurrency limits.
+- Prevent abuse of expensive AI endpoints.
+- Add request and processing timeouts.
+- Handle rate limits.
+- Avoid uncontrolled AI API calls.
+- Support local model modes where practical.
+- Keep external AI providers optional.
+- Provide low-cost deployment options.
+
+Do not introduce expensive infrastructure without a clear need.
+
+---
+
+13. OBSERVABILITY & OPERATIONAL RELIABILITY
+
+Implement production-friendly monitoring and diagnostics.
+
+- Structured logs
+- Request IDs
+- Task IDs
+- Error tracking
+- API health endpoint
+- Database health checks
+- Redis health checks
+- Worker health checks
+- External API status
+- Processing duration
+- Failure rates
+- AI model availability
+- OCR availability
+- Disk and temporary file management
+
+Ensure sensitive data, tokens, document content, and credentials are not unnecessarily written to logs.
+
+Implement clear health and readiness checks.
+
+---
+
+14. COMPLETE AUTOMATED TESTING
+
+Do not stop after unit tests.
+
+Backend
+
+- Unit tests
+- API tests
+- Service tests
+- Authentication tests
+- Authorization tests
+- Ownership/isolation tests
+- Database tests
+- Migration tests
+- File upload tests
+- Parser tests
+- OCR tests
+- Similarity tests
+- Citation tests
+- AI analyzer tests
+- Paper generation tests
+- Refinement tests
+- Export tests
+- Job lifecycle tests
+
+Frontend
+
+- TypeScript checks
+- Linting
+- Production build
+- API integration tests
+- Component tests where appropriate
+
+Integration
+
+Test:
+
+- FastAPI
+- PostgreSQL
+- pgvector
+- Redis
+- Celery
+- Firebase authentication
+- File processing
+- All nine modules
+- Document exports
+
+End-to-end
+
+Test the real workflow:
+
+1. User signs in.
+2. Creates a project.
+3. Uploads a document or repository.
+4. Runs an analysis.
+5. Job enters the queue.
+6. Worker processes the task.
+7. Backend stores the result.
+8. Frontend retrieves the result.
+9. User views evidence and results.
+10. User edits or refines content.
+11. User exports the document.
+12. User can access their project later.
+13. Another user cannot access the first user's data.
+
+Use realistic test data and verify actual results.
+
+Do not simply report that tests passed if tests were not executed.
+
+---
+
+15. ALL NINE MODULES — FEATURE COMPLETENESS AUDIT
+
+Audit every existing module and verify that the entire workflow works end-to-end.
+
+1. AI Research Paper Generator
+2. Plagiarism & Similarity Checker
+3. AI-Writing Pattern Analyzer
+4. Citation Intelligence
+5. Research Quality Evaluator
+6. Technical Project-to-Paper Analyzer
+7. Academic Writing Studio
+8. Final Research Integrity Audit
+9. AI Research Humanization & Refinement Engine
+
+For each module verify:
+
+- Frontend functionality
+- API functionality
+- Authentication
+- Authorization
+- Validation
+- AI/ML implementation
+- Database persistence
+- Background jobs
+- Failure handling
+- Result accuracy
+- Evidence traceability
+- Export or downstream integration
+- Tests
+
+Create a module-by-module status matrix.
+
+---
+
+16. CODE QUALITY & DEPENDENCY AUDIT
+
+- Remove unused dependencies.
+- Resolve dependency conflicts.
+- Check vulnerable packages.
+- Remove duplicate code.
+- Fix TypeScript errors.
+- Fix Python lint/type issues where feasible.
+- Improve naming and code organization.
+- Remove dead endpoints.
+- Remove placeholder implementations.
+- Remove mock production data.
+- Improve documentation.
+- Ensure reproducible installation.
+- Pin or constrain dependencies appropriately.
+- Verify clean installation from scratch.
+
+Do not use unsafe commands such as indiscriminate dependency upgrades that may break the application.
+
+---
+
+17. REQUIRED FINAL VALIDATION
+
+After implementation, perform the complete validation process.
+
+Run and report actual results for:
+
+- Python compilation
+- Python tests
+- Backend tests
+- Frontend lint
+- TypeScript
+- Frontend production build
+- Database migration from clean state
+- Database migration from existing state
+- PostgreSQL integration
+- pgvector tests
+- Redis
+- Celery worker
+- Firebase authentication
+- Security tests
+- File upload tests
+- OCR tests
+- AI/ML service tests
+- Citation verification tests
+- Export tests
+- API integration tests
+- End-to-end workflows
+- Docker build
+- Docker Compose startup
+- Health checks
+- Deployment configuration validation
+
+Fix failures and rerun affected tests.
+
+If an external service, credential, API key, or infrastructure is unavailable, clearly identify the unverified portion. Never fabricate test success.
+
+---
+
+18. IMPLEMENTATION STRATEGY
+
+Work in controlled phases:
+
+Phase 1 — Full Audit
+
+Inspect the complete repository. Identify actual implementations, incomplete modules, security issues, architecture conflicts, deployment blockers, and test gaps.
+
+Phase 2 — Critical Architecture and Security
+
+Fix backend duplication, Firebase authentication/authorization, ownership isolation, secrets, production configuration, and file security.
+
+Phase 3 — AI/ML Accuracy
+
+Improve similarity retrieval, citation verification, writing analysis, research quality evaluation, project analysis, and evidence traceability.
+
+Phase 4 — Documents and Refinement
+
+Improve parsing, OCR, preservation of document structures, semantic preservation, and export correctness.
+
+Phase 5 — Infrastructure and Jobs
+
+Fix database architecture, migrations, pgvector, Redis, Celery, retries, recovery, Docker, and deployment.
+
+Phase 6 — Integration and Testing
+
+Run real unit, integration, security, frontend, and end-to-end tests.
+
+Phase 7 — Final Release Audit
+
+Resolve remaining blockers, update documentation, and prepare a final release-readiness report.
+
+Do not stop at creating a plan. Implement the upgrades directly wherever the environment allows.
+
+---
+
+STRICT ENGINEERING RULES
+
+- Do not replace real implementations with mock implementations.
+- Do not fake AI analysis.
+- Do not fabricate accuracy metrics.
+- Do not fabricate test results.
+- Do not claim Firebase is secure without verifying it.
+- Do not claim production readiness based on screenshots.
+- Do not weaken security to make tests pass.
+- Do not remove existing functionality unnecessarily.
+- Do not change the UI drastically unless a real usability issue requires it.
+- Do not introduce paid services as mandatory dependencies.
+- Keep optional AI provider integrations optional.
+- Do not add features unrelated to the production-hardening objective.
+- Fix root causes rather than hide errors.
+- Maintain backwards compatibility where reasonable.
+- Keep the implementation maintainable and documented.
+
+FINAL DELIVERABLE
+
+At completion, provide:
+
+1. Executive summary of the upgrades implemented.
+2. Complete list of security vulnerabilities/issues found and fixed.
+3. Firebase authentication and authorization audit results.
+4. AI/ML accuracy and limitations assessment.
+5. Module-by-module completion matrix for all 9 modules.
+6. Backend architecture summary.
+7. Database and pgvector verification results.
+8. OCR and document processing verification.
+9. Background job reliability improvements.
+10. Frontend integration and UI changes.
+11. Deployment configuration changes.
+12. Test results with exact pass/fail counts.
+13. Remaining issues that require external credentials, services, or manual validation.
+14. Production deployment instructions.
+15. Final release-readiness score with clear justification.
+
+Classify the application honestly as:
+
+- Not ready
+- Development ready
+- Beta ready
+- Release candidate
+- Production ready
+
+Production ready must only be awarded when critical security, integration, infrastructure, and end-to-end validation gates are actually passed.
+
+Final objective: ResearchForge AI should become a technically credible, secure, accurate, reliable, maintainable, and genuinely production-deployable research intelligence platform—not merely a visually impressive prototype.

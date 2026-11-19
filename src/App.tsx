@@ -1,6 +1,7 @@
 import React, { useEffect } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { LandingPage } from './pages/LandingPage';
 import { AuthPage } from './pages/AuthPage';
 import { DashboardPage } from './pages/DashboardPage';
@@ -23,9 +24,17 @@ function AutostartHandler() {
 
   useEffect(() => {
     const params = new URLSearchParams(location.search);
-    if (params.get('autostart') === '1' && !user) {
-      loginDemo().then(() => navigate('/dashboard', { replace: true }));
-    }
+    if (params.get('autostart') !== '1' || user) return;
+
+    fetch('/api/health')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((health) => {
+        if (health?.demoEnabled) {
+          return loginDemo().then(() => navigate('/dashboard', { replace: true }));
+        }
+        return undefined;
+      })
+      .catch(() => {});
   }, [location.search, user, loginDemo, navigate]);
 
   return null;
@@ -48,10 +57,11 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
 
 export default function App() {
   return (
-    <AuthProvider>
-      <BrowserRouter>
-        <AutostartHandler />
-        <Routes>
+    <ErrorBoundary>
+      <AuthProvider>
+        <BrowserRouter>
+          <AutostartHandler />
+          <Routes>
           <Route path="/" element={<LandingPage />} />
           <Route path="/auth" element={<AuthPage />} />
           <Route
@@ -154,5 +164,6 @@ export default function App() {
         </Routes>
       </BrowserRouter>
     </AuthProvider>
+    </ErrorBoundary>
   );
 }

@@ -1,5 +1,5 @@
 import json
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from sqlalchemy.orm import Session
 
 from ...core.config import get_settings
@@ -11,7 +11,7 @@ from ...services.project_analyzer_service import (
     cross_check_paper_against_code,
     extract_and_analyze_zip,
 )
-from ..deps import get_current_user, read_validated_upload, record_activity
+from ..deps import get_current_user, get_owned_or_404, read_validated_upload, record_activity
 
 router = APIRouter(tags=["Projects & Code-to-Paper"])
 
@@ -36,9 +36,19 @@ def _serialize_project(p: Project) -> dict:
 
 
 @router.get("/projects")
-def list_projects(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    rows = db.query(Project).filter(Project.user_id == current_user.id).order_by(Project.updated_at.desc()).all()
-    return {"projects": [_serialize_project(r) for r in rows]}
+def list_projects(
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    q = db.query(Project).filter(Project.user_id == current_user.id)
+    total = q.count()
+    rows = q.order_by(Project.updated_at.desc()).offset(offset).limit(limit).all()
+    return {
+        "projects": [_serialize_project(r) for r in rows],
+        "pagination": {"total": total, "limit": limit, "offset": offset},
+    }
 
 
 @router.post("/projects/analyze-zip", status_code=status.HTTP_201_CREATED)
@@ -59,7 +69,7 @@ async def upload_project_zip(
 
     settings = get_settings()
     data = await read_validated_upload(upload)
-    proj_title = title.strip() or (upload.filename or "Uploaded Project").rsplit(".", 1)[0]
+    proj_title = (title.strip() or (upload.filename or "Uploaded Project").rsplit(".", 1)[0])[:255]
     try:
         analysis = extract_and_analyze_zip(
             data,
@@ -74,7 +84,7 @@ async def upload_project_zip(
         user_id=current_user.id,
         title=proj_title,
         description=analysis.get("readmeSummary", "")[:500],
-        domain=domain,
+        domain=domain[:128],
         source_type="zip",
         analysis_json=json.dumps(analysis),
     )
@@ -101,11 +111,11 @@ async def import_github_project(
     meta = analysis.get("githubMeta", {})
     project = Project(
         user_id=current_user.id,
-        title=(payload.title or meta.get("fullName") or "GitHub Project").strip(),
-        description=meta.get("description", ""),
-        domain=payload.domain,
+        title=(payload.title or meta.get("fullName") or "GitHub Project").strip()[:255],
+        description=(meta.get("description", "") or "")[:500],
+        domain=payload.domain[:128],
         source_type="github",
-        source_url=payload.repoUrl,
+        source_url=payload.repoUrl[:512],
         analysis_json=json.dumps(analysis),
     )
     db.add(project)
@@ -118,9 +128,7 @@ async def import_github_project(
 
 @router.delete("/projects/{project_id}")
 def delete_project(project_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    project = db.query(Project).filter(Project.id == project_id, Project.user_id == current_user.id).first()
-    if not project:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found.")
+    project = get_owned_or_404(db, Project, project_id, current_user.id, "Project not found.")
     db.delete(project)
     db.commit()
     return {"deleted": True}
@@ -133,15 +141,11 @@ def cross_check(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    project = db.query(Project).filter(Project.id == payload.projectId, Project.user_id == current_user.id).first()
-    if not project:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found.")
+    project = get_owned_or_404(db, Project, payload.projectId, current_user.id, "Project not found.")
 
     paper_text = payload.customText or ""
     if payload.documentId:
-        doc = db.query(Document).filter(Document.id == payload.documentId, Document.user_id == current_user.id).first()
-        if not doc:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found.")
+        doc = get_owned_or_404(db, Document, payload.documentId, current_user.id, "Document not found.")
         paper_text = doc.raw_text
 
     if not paper_text.strip():

@@ -41,6 +41,25 @@ export async function logActivity(
   }
 }
 
+export function computeNormalizedChunkVector384(text: string): number[] {
+  const vec = new Array<number>(384).fill(0);
+  const tokens = (text.toLowerCase().match(/[a-z0-9]{2,}/g) || []).slice(0, 400);
+  for (const tok of tokens) {
+    let h = 2166136261;
+    for (let i = 0; i < tok.length; i++) {
+      h ^= tok.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+    const idx = Math.abs(h) % 384;
+    vec[idx] += 1;
+  }
+  const norm = Math.sqrt(vec.reduce((acc, v) => acc + v * v, 0));
+  if (norm > 0) {
+    for (let i = 0; i < 384; i++) vec[i] = Number((vec[i] / norm).toFixed(6));
+  }
+  return vec;
+}
+
 export async function indexDocumentChunks(
   userId: string,
   documentId: string,
@@ -52,26 +71,60 @@ export async function indexDocumentChunks(
     const chunks = chunkDocumentText(rawText, 160);
     if (chunks.length === 0) return;
     await db.insert(corpusChunks).values(
-      chunks.slice(0, 40).map((content, idx) => ({
-        id: newId('chk'),
-        userId,
-        documentId,
-        sourceType: 'workspace',
-        title: title.slice(0, 500),
-        authors: '',
-        year: '',
-        url: '',
-        chunkIndex: idx,
-        content,
-        embeddingJson: '[]',
-      }))
+      chunks.slice(0, 40).map((content, idx) => {
+        const vec = computeNormalizedChunkVector384(content);
+        return {
+          id: newId('chk'),
+          userId,
+          documentId,
+          sourceType: 'workspace',
+          title: title.slice(0, 500),
+          authors: '',
+          year: '',
+          url: '',
+          chunkIndex: idx,
+          content,
+          embeddingJson: JSON.stringify(vec),
+          embedding: vec,
+        };
+      })
     );
   } catch (err) {
     console.error('Database chunk indexing failed:', err);
   }
 }
 
+export async function queryPgvectorSimilarChunks(
+  userId: string,
+  queryText: string,
+  excludeDocumentId?: string,
+  limit = 6
+): Promise<Array<{ id: string; title: string; source: string; text: string }>> {
+  try {
+    const qVec = computeNormalizedChunkVector384(queryText.slice(0, 2000));
+    const vecLiteral = `[${qVec.join(',')}]`;
+    const excludeClause = excludeDocumentId
+      ? sql`AND document_id IS DISTINCT FROM ${excludeDocumentId}`
+      : sql``;
+    const rows = await db.execute(
+      sql`SELECT id, document_id, title, content FROM corpus_chunks WHERE user_id = ${userId} AND embedding IS NOT NULL ${excludeClause} ORDER BY embedding <=> ${vecLiteral}::vector LIMIT ${limit}`
+    );
+    const items = (rows as any)?.rows ?? [];
+    return items.map((r: any) => ({
+      id: String(r.document_id || r.id),
+      title: String(r.title || 'Workspace Chunk'),
+      source: 'Workspace pgvector Chunk',
+      text: String(r.content || ''),
+    }));
+  } catch {
+    return [];
+  }
+}
+
 export async function ensureDemoWorkspaceSeeded() {
+  if ((process.env.NODE_ENV || '').toLowerCase() === 'production') {
+    throw new Error('Demo workspace is disabled in production.');
+  }
   try {
     const demoEmail = 'researcher@researchforge.ai';
     const existing = await db.select().from(users).where(eq(users.email, demoEmail)).limit(1);
@@ -88,7 +141,7 @@ export async function ensureDemoWorkspaceSeeded() {
           email: demoEmail,
           name: 'Dr. Elena Vance',
           institution: 'Center for Computational Research & AI Integrity',
-          role: 'Principal Researcher',
+          role: 'Demo Workspace',
           passwordHash,
           authProvider: 'demo',
           consentAnalytics: true,

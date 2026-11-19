@@ -90,6 +90,38 @@ def compute_semantic_embeddings(texts: List[str]) -> List[List[float]] | None:
         return None
 
 
+def query_pgvector_similar_chunks(db, user_id: str, query_text: str, exclude_document_id: str | None = None, limit: int = 8) -> List[Dict[str, Any]]:
+    """Query native pgvector cosine distance on PostgreSQL when embeddings exist."""
+    from ..models.entities import CorpusChunk
+
+    vecs = compute_semantic_embeddings([query_text[:1500]])
+    if not vecs or not vecs[0]:
+        return []
+    bind = db.get_bind()
+    if bind is None or bind.dialect.name != "postgresql":
+        return []
+
+    try:
+        q = db.query(CorpusChunk).filter(CorpusChunk.user_id == user_id, CorpusChunk.embedding.isnot(None))
+        if exclude_document_id:
+            q = q.filter(CorpusChunk.document_id != exclude_document_id)
+        rows = q.order_by(CorpusChunk.embedding.cosine_distance(vecs[0])).limit(limit).all()
+        return [
+            {
+                "id": r.document_id or r.id,
+                "title": r.title,
+                "authors": r.authors,
+                "year": r.year,
+                "url": r.url,
+                "source": "Workspace pgvector Chunk",
+                "text": r.content,
+            }
+            for r in rows
+        ]
+    except Exception:
+        return []
+
+
 def tokenize(text: str) -> List[str]:
     cleaned = re.sub(r"[^a-z0-9\s-]", " ", text.lower())
     return [t for t in cleaned.split() if len(t) > 1]
@@ -180,17 +212,27 @@ def analyze_text_similarity(input_text: str, corpus: List[Dict[str, Any]], arxiv
             "overallSimilarityPercent": 0.0,
             "exactMatchPercent": 0.0,
             "nearMatchPercent": 0.0,
+            "paraphrasePercent": 0.0,
             "semanticOverlapPercent": 0.0,
             "quotedPercent": 0.0,
             "uncitedFlagCount": 0,
-            "engineMethod": "lexical-bm25",
+            "engineMethod": "tfidf+bm25+ngram",
             "corpusCoverage": {
                 "indexedDocuments": len(corpus),
+                "indexedChunks": 0,
                 "arxivAbstractsQueried": arxiv_count,
                 "limitationNotice": (
-                    "Similarity measured against workspace documents, open-access baseline papers, and arXiv abstracts; "
+                    "Similarity measured against workspace documents, pgvector chunks, open-access baseline papers, and arXiv abstracts; "
                     "not equivalent to proprietary Turnitin/CrossCheck databases."
                 ),
+            },
+            "algorithmBreakdown": {
+                "meanExact": 0.0,
+                "meanNgramJaccard": 0.0,
+                "meanFuzzyDice": 0.0,
+                "meanTfidfCosine": 0.0,
+                "meanBm25Normalized": 0.0,
+                "meanSemanticOverlap": 0.0,
             },
             "paragraphMatches": [],
             "matches": [],
@@ -205,7 +247,7 @@ def analyze_text_similarity(input_text: str, corpus: List[Dict[str, Any]], arxiv
 
     dense_in = compute_semantic_embeddings(input_sents)
     dense_corpus = compute_semantic_embeddings([c["sentence"] for c in corpus_sents]) if dense_in is not None else None
-    engine_method = "sentence-transformers+bm25+faiss" if (dense_in is not None and dense_corpus is not None) else "tfidf+bm25+ngram"
+    engine_method = "sentence-transformers+pgvector+bm25" if (dense_in is not None and dense_corpus is not None) else "tfidf+bm25+ngram"
 
     all_sets = [set(c["sem_t"]) for c in corpus_sents] + [set(content_tokens(s)) for s in input_sents]
     df = Counter()
@@ -274,6 +316,10 @@ def analyze_text_similarity(input_text: str, corpus: List[Dict[str, Any]], arxiv
                     "combinedScore": round(combined, 3),
                     "category": cat,
                     "hasCitation": has_citation,
+                    "explanation": (
+                        f"Classification '{cat}' driven by exact={round(exact, 2)}, 3-gram={round(ng, 2)}, "
+                        f"TF-IDF={round(tf, 2)}, BM25={round(bm, 2)}, semantic={round(sem, 2)}."
+                    ),
                 }
 
         if best and best["combinedScore"] >= 0.22:
@@ -293,7 +339,6 @@ def analyze_text_similarity(input_text: str, corpus: List[Dict[str, Any]], arxiv
             elif best["category"] == "Semantic Overlap":
                 semantic_hits += 1
 
-    # Paragraph-level chunk overlap summary
     para_matches = []
     for p_idx, para in enumerate(input_paras[:20]):
         p_tokens = content_tokens(para)
@@ -317,22 +362,36 @@ def analyze_text_similarity(input_text: str, corpus: List[Dict[str, Any]], arxiv
         for m in matches
     ) / total
 
+    denom = max(len(matches), 1)
+    algorithm_breakdown = {
+        "meanExact": round(sum(m["exactScore"] for m in matches) / denom, 3) if matches else 0.0,
+        "meanNgramJaccard": round(sum(m["ngramScore"] for m in matches) / denom, 3) if matches else 0.0,
+        "meanFuzzyDice": round(sum(m["fuzzyScore"] for m in matches) / denom, 3) if matches else 0.0,
+        "meanTfidfCosine": round(sum(m["tfidfCosine"] for m in matches) / denom, 3) if matches else 0.0,
+        "meanBm25Normalized": round(sum(m["bm25Score"] for m in matches) / denom, 3) if matches else 0.0,
+        "meanSemanticOverlap": round(sum(m["semanticScore"] for m in matches) / denom, 3) if matches else 0.0,
+    }
+    near_pct = round((near_hits / total) * 100.0, 1)
+
     return {
         "overallSimilarityPercent": round(min(100.0, weighted * 100.0), 1),
         "exactMatchPercent": round((exact_hits / total) * 100.0, 1),
-        "nearMatchPercent": round((near_hits / total) * 100.0, 1),
+        "nearMatchPercent": near_pct,
+        "paraphrasePercent": near_pct,
         "semanticOverlapPercent": round((semantic_hits / total) * 100.0, 1),
         "quotedPercent": round((quoted_hits / total) * 100.0, 1),
         "uncitedFlagCount": uncited_flags,
         "engineMethod": engine_method,
         "corpusCoverage": {
             "indexedDocuments": len(corpus),
+            "indexedChunks": len(corpus_sents),
             "arxivAbstractsQueried": arxiv_count,
             "limitationNotice": (
-                "Similarity is measured against workspace documents, built-in open-access references, and live arXiv abstracts; "
+                "Similarity is measured against workspace documents, pgvector chunks, built-in open-access references, and live arXiv abstracts; "
                 "not equivalent to proprietary publisher databases."
             ),
         },
+        "algorithmBreakdown": algorithm_breakdown,
         "paragraphMatches": sorted(para_matches, key=lambda x: x["score"], reverse=True)[:10],
         "matches": sorted(matches, key=lambda x: x["combinedScore"], reverse=True),
     }

@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useEffect, useState, useCallback } from 'react';
-import { onAuthStateChanged, signInWithPopup, signOut } from 'firebase/auth';
+import { onAuthStateChanged, onIdTokenChanged, signInWithPopup, signOut } from 'firebase/auth';
 import { auth, googleAuthProvider } from '../lib/firebase';
 import { apiFetch, getAuthToken, setAuthToken } from '../lib/api';
 
@@ -9,6 +9,7 @@ export interface UserProfile {
   name: string;
   institution: string;
   role: string;
+  authProvider?: string;
   consentAnalytics: boolean;
   consentRetention: boolean;
 }
@@ -17,7 +18,7 @@ interface AuthContextValue {
   user: UserProfile | null;
   loading: boolean;
   login: (email: string, password: string) => Promise<void>;
-  register: (data: { name: string; email: string; password: string; institution?: string; role?: string }) => Promise<void>;
+  register: (data: { name: string; email: string; password: string; institution?: string }) => Promise<void>;
   loginWithGoogle: () => Promise<void>;
   loginDemo: () => Promise<void>;
   logout: () => Promise<void>;
@@ -49,7 +50,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async (fbUser) => {
+    const unsubAuth = onAuthStateChanged(auth, async (fbUser) => {
       if (fbUser) {
         try {
           const idToken = await fbUser.getIdToken();
@@ -69,7 +70,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         await refreshUser();
       }
     });
-    return () => unsub();
+
+    const unsubToken = onIdTokenChanged(auth, async (fbUser) => {
+      if (fbUser) {
+        try {
+          const fresh = await fbUser.getIdToken();
+          setAuthToken(fresh, true);
+        } catch {
+          // ignore transient refresh failure
+        }
+      }
+    });
+
+    return () => {
+      unsubAuth();
+      unsubToken();
+    };
   }, [refreshUser]);
 
   const login = async (email: string, password: string) => {
@@ -81,10 +97,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setUser(data.user);
   };
 
-  const register = async (payload: { name: string; email: string; password: string; institution?: string; role?: string }) => {
+  const register = async (payload: { name: string; email: string; password: string; institution?: string }) => {
     const data = await apiFetch<{ token: string; user: UserProfile }>('/api/auth/register', {
       method: 'POST',
-      body: JSON.stringify(payload),
+      body: JSON.stringify({
+        name: payload.name,
+        email: payload.email,
+        password: payload.password,
+        institution: payload.institution || '',
+      }),
     });
     setAuthToken(data.token, false);
     setUser(data.user);
@@ -110,6 +131,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   const logout = async () => {
+    try {
+      await apiFetch('/api/auth/logout', { method: 'POST' });
+    } catch {
+      // continue local logout even if network call fails
+    }
     setAuthToken(null);
     setUser(null);
     try {

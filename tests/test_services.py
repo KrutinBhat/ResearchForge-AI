@@ -5,14 +5,23 @@ import zipfile
 from app.core.security import validate_file_signature, validate_public_github_url
 from app.services.citation_service import (
     detect_duplicate_references,
+    escape_bibtex_value,
+    evaluate_bibtex_entry_against_record,
     evaluate_claim_support,
+    export_bibtex_collection,
     extract_reference_identifiers,
     format_apa,
     format_ieee,
+    generate_citation_key,
+    parse_bibtex_entries,
     reconcile_citations_and_references,
+    validate_bibtex_syntax,
 )
 from app.services.document_parser import (
+    MAX_OCR_PAGES,
+    MIN_DIGITAL_CHARS_PER_PAGE,
     chunk_document_text,
+    evaluate_pdf_page_ocr_plan,
     extract_equations,
     extract_tables_and_figures,
     parse_raw_text,
@@ -217,6 +226,111 @@ class TestResearchForgePythonServices(unittest.TestCase):
         self.assertIn("99%", drifted["addedNumbersFlagged"])
         self.assertIn("Transformer", drifted["missingTerms"])
         self.assertFalse(drifted["meaningRetained"])
+
+    def test_mixed_pdf_ocr_plan_and_30_page_cap(self):
+        self.assertEqual(MIN_DIGITAL_CHARS_PER_PAGE, 50)
+        self.assertEqual(MAX_OCR_PAGES, 30)
+
+        # Mixed document: page 1 digital (>50 chars), pages 2..36 scanned (<50 chars) -> 35 scanned, capped at 30
+        page_char_counts = [120] + [4] * 35
+        plan = evaluate_pdf_page_ocr_plan(page_char_counts)
+        self.assertEqual(plan["digitalPageCount"], 1)
+        self.assertTrue(plan["isMixedPdf"])
+        self.assertEqual(len(plan["scannedPagesDetected"]), 35)
+        self.assertEqual(len(plan["pagesToOcr"]), 30)
+        self.assertEqual(len(plan["skippedPagesDueToLimit"]), 5)
+
+    def test_bibtex_escaping_collision_keys_validation_and_verified_only_export(self):
+        self.assertIn(r"\&", escape_bibtex_value("Systems & Networks_v2"))
+        self.assertIn(r"\%", escape_bibtex_value("100% Accuracy"))
+
+        used = set()
+        k1 = generate_citation_key(["Ashish Vaswani"], 2017, "Attention Is All You Need", used)
+        k2 = generate_citation_key(["Ashish Vaswani"], 2017, "Attention Is All You Need", used)
+        self.assertEqual(k1, "vaswani2017attention")
+        self.assertEqual(k2, "vaswani2017attentiona")
+
+        citations = [
+            {
+                "id": "c1",
+                "rawReference": "[1] A. Vaswani et al., Attention Is All You Need, NeurIPS 2017.",
+                "status": "Verified",
+                "matchedTitle": "Attention Is All You Need",
+                "authors": ["Ashish Vaswani", "Noam Shazeer"],
+                "year": "2017",
+                "venue": "Advances in Neural Information Processing Systems",
+                "volume": "30",
+                "pages": "5998-6008",
+                "doi": "10.5555/3295222.3295349",
+                "entryType": "inproceedings",
+            },
+            {
+                "id": "c2",
+                "rawReference": "[2] Ghost Reference, Fabricated Study, 2099.",
+                "status": "Unverified",
+                "matchedTitle": None,
+                "authors": [],
+                "year": "2099",
+            },
+        ]
+
+        verified_only = export_bibtex_collection(citations, include_unverified=False)
+        self.assertEqual(verified_only["includedCount"], 1)
+        self.assertEqual(verified_only["skippedCount"], 1)
+        self.assertTrue(verified_only["validation"]["valid"])
+        self.assertIn("@inproceedings{vaswani2017attention,", verified_only["bibtex"])
+        self.assertIn("pages = {5998-6008}", verified_only["bibtex"])
+        self.assertNotIn("2099", verified_only["bibtex"])
+
+        with_unverified = export_bibtex_collection(citations, include_unverified=True)
+        self.assertEqual(with_unverified["includedCount"], 2)
+        self.assertEqual(with_unverified["skippedCount"], 0)
+        self.assertTrue(with_unverified["validation"]["valid"])
+        self.assertIn("% WARNING:", with_unverified["bibtex"])
+
+        bad_syntax = validate_bibtex_syntax("@article{broken,\n  title = {Unclosed")
+        self.assertFalse(bad_syntax["valid"])
+
+    def test_bibtex_parser_and_crossref_discrepancy_evaluation(self):
+        raw_bib = """% Sample bibliography
+@inproceedings{he2016deep,
+  author = {Kaiming He and Xiangyu Zhang and Shaoqing Ren and Jian Sun},
+  title = {{Deep} Residual Learning for Image Recognition},
+  booktitle = {CVPR},
+  year = {2017},
+  doi = {10.1109/CVPR.2016.90}
+}"""
+        entries = parse_bibtex_entries(raw_bib)
+        self.assertEqual(len(entries), 1)
+        entry = entries[0]
+        self.assertEqual(entry["citeKey"], "he2016deep")
+        self.assertEqual(entry["title"], "Deep Residual Learning for Image Recognition")
+        self.assertEqual(len(entry["authors"]), 4)
+        self.assertEqual(entry["doi"], "10.1109/CVPR.2016.90")
+
+        # Simulated Crossref record with canonical year 2016 -> should flag year discrepancy and Needs review
+        mock_lookup = {
+            "registry": "Crossref",
+            "matchedTitle": "Deep Residual Learning for Image Recognition",
+            "authors": ["Kaiming He", "Xiangyu Zhang", "Shaoqing Ren", "Jian Sun"],
+            "year": "2016",
+            "venue": "Proceedings of CVPR",
+            "doi": "10.1109/CVPR.2016.90",
+            "url": "https://doi.org/10.1109/CVPR.2016.90",
+            "entryType": "inproceedings",
+        }
+        res = evaluate_bibtex_entry_against_record(entry, mock_lookup)
+        self.assertEqual(res["status"], "Needs review")
+        self.assertFalse(res["yearMatched"])
+        self.assertTrue(res["doiMatched"])
+        self.assertTrue(res["authorMatched"])
+        self.assertTrue(any(d["field"] == "year" for d in res["discrepancies"]))
+
+        claim = evaluate_claim_support(
+            "Residual connections improve gradient flow in deep networks",
+            "Deep residual networks simplify optimization and improve gradient flow.",
+        )
+        self.assertTrue(bool(claim.get("explanation")))
 
 
 if __name__ == "__main__":

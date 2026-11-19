@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from 'react';
-import { BookCheck, Copy, Check } from 'lucide-react';
+import { BookCheck, Copy, Check, Download, FileCode2 } from 'lucide-react';
 import { WorkspaceLayout } from '../components/WorkspaceLayout';
 import { StatusLabel } from '../components/StatusLabel';
+import { BibtexVerificationPanel } from '../components/BibtexVerificationPanel';
 import { apiFetch } from '../lib/api';
 
 interface DocumentOption {
@@ -9,33 +10,41 @@ interface DocumentOption {
   title: string;
 }
 
+interface CitationItem {
+  id: string;
+  rawReference: string;
+  status: string;
+  bibliographicStatus?: string;
+  claimSupportStatus?: string;
+  matchedProvider: string;
+  titleMatchScore: number;
+  yearMatched: boolean | null;
+  authorMatched: boolean | null;
+  verifiedMetadata: {
+    title?: string;
+    authors?: string[];
+    year?: number | string;
+    venue?: string;
+    doi?: string;
+    url?: string;
+    volume?: string;
+    issue?: string;
+    pages?: string;
+    publisher?: string;
+    isbn?: string;
+    entryType?: string;
+    credibilityNote?: string;
+  } | null;
+  formattedIEEE: string;
+  formattedAPA: string;
+  flags: string[];
+  citedInText: boolean;
+}
+
 interface CitationResult {
   title: string;
   audit: {
-    citations: Array<{
-      id: string;
-      rawReference: string;
-      status: string;
-      bibliographicStatus?: string;
-      claimSupportStatus?: string;
-      matchedProvider: string;
-      titleMatchScore: number;
-      yearMatched: boolean | null;
-      authorMatched: boolean | null;
-      verifiedMetadata: {
-        title?: string;
-        authors?: string[];
-        year?: number;
-        venue?: string;
-        doi?: string;
-        url?: string;
-        credibilityNote?: string;
-      } | null;
-      formattedIEEE: string;
-      formattedAPA: string;
-      flags: string[];
-      citedInText: boolean;
-    }>;
+    citations: CitationItem[];
     summary: {
       totalReferences: number;
       verifiedCount: number;
@@ -54,6 +63,20 @@ interface CitationResult {
   } | null;
 }
 
+interface BibtexExportResponse {
+  bibtex: string;
+  includeUnverified: boolean;
+  includedCount: number;
+  skippedCount: number;
+  skippedEntries: Array<{ id: string; rawReference: string; reason: string }>;
+  validation: {
+    valid: boolean;
+    entryCount: number;
+    keys: string[];
+    errors: string[];
+  };
+}
+
 export function CitationIntelligencePage() {
   const [documents, setDocuments] = useState<DocumentOption[]>([]);
   const [documentId, setDocumentId] = useState('');
@@ -65,6 +88,15 @@ export function CitationIntelligencePage() {
   const [running, setRunning] = useState(false);
   const [error, setError] = useState('');
   const [result, setResult] = useState<CitationResult | null>(null);
+  const [activeTab, setActiveTab] = useState<'references' | 'bibtex'>('references');
+
+  // Dedicated BibTeX Exporter state
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [includeUnverified, setIncludeUnverified] = useState(false);
+  const [bibLoading, setBibLoading] = useState(false);
+  const [bibError, setBibError] = useState('');
+  const [bibCopied, setBibCopied] = useState(false);
+  const [bibtexResult, setBibtexResult] = useState<BibtexExportResponse | null>(null);
 
   useEffect(() => {
     apiFetch<{ documents: DocumentOption[] }>('/api/documents')
@@ -78,6 +110,7 @@ export function CitationIntelligencePage() {
   const handleVerify = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
+    setBibError('');
     setRunning(true);
     try {
       const res = await apiFetch<CitationResult>('/api/citations/verify', {
@@ -90,11 +123,67 @@ export function CitationIntelligencePage() {
         }),
       });
       setResult(res);
+      const allIds = res.audit.citations.map((c) => c.id);
+      setSelectedIds(allIds);
     } catch (err: any) {
       setError(err.message);
     } finally {
       setRunning(false);
     }
+  };
+
+  useEffect(() => {
+    if (!result || result.audit.citations.length === 0) {
+      setBibtexResult(null);
+      return;
+    }
+    const chosen = result.audit.citations.filter((c) => selectedIds.includes(c.id));
+    if (chosen.length === 0) {
+      setBibtexResult({
+        bibtex: '% Select one or more citations above to generate BibTeX entries.\n',
+        includeUnverified,
+        includedCount: 0,
+        skippedCount: 0,
+        skippedEntries: [],
+        validation: { valid: true, entryCount: 0, keys: [], errors: [] },
+      });
+      return;
+    }
+
+    let cancelled = false;
+    setBibLoading(true);
+    setBibError('');
+    apiFetch<BibtexExportResponse>('/api/citations/export-bibtex', {
+      method: 'POST',
+      body: JSON.stringify({ citations: chosen, includeUnverified }),
+    })
+      .then((data) => {
+        if (!cancelled) setBibtexResult(data);
+      })
+      .catch((err: any) => {
+        if (!cancelled) setBibError(err.message || 'Failed to generate BibTeX output.');
+      })
+      .finally(() => {
+        if (!cancelled) setBibLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [result, selectedIds, includeUnverified]);
+
+  const toggleCitationSelection = (id: string) => {
+    setSelectedIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  };
+
+  const selectVerifiedOnly = () => {
+    if (!result) return;
+    setSelectedIds(result.audit.citations.filter((c) => c.status === 'Verified').map((c) => c.id));
+  };
+
+  const selectAllCitations = () => {
+    if (!result) return;
+    setSelectedIds(result.audit.citations.map((c) => c.id));
   };
 
   const handleCopy = (id: string, text: string) => {
@@ -103,10 +192,30 @@ export function CitationIntelligencePage() {
     setTimeout(() => setCopiedId(''), 1500);
   };
 
+  const handleCopyBibtex = () => {
+    if (!bibtexResult?.bibtex) return;
+    navigator.clipboard?.writeText(bibtexResult.bibtex);
+    setBibCopied(true);
+    setTimeout(() => setBibCopied(false), 1800);
+  };
+
+  const handleDownloadBibtex = () => {
+    if (!bibtexResult?.bibtex) return;
+    const blob = new Blob([bibtexResult.bibtex], { type: 'application/x-bibtex;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'references.bib';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <WorkspaceLayout
       title="Citation Intelligence Engine"
-      subtitle="Verify DOIs, titles, authors, and publication years live against Crossref, OpenAlex, Semantic Scholar, and arXiv. Flag unverified or fabricated citations without inventing metadata."
+      subtitle="Verify DOIs, titles, authors, and publication years live against Crossref, OpenAlex, Semantic Scholar, and arXiv. Flag unverified citations and export validated BibTeX."
     >
       {error && (
         <div role="alert" className="mb-6 p-4 rounded-lg border border-red-200 bg-red-50 text-sm text-red-800">
@@ -114,7 +223,42 @@ export function CitationIntelligencePage() {
         </div>
       )}
 
-      <form onSubmit={handleVerify} className="bg-white border border-slate-200 rounded-xl p-6 mb-8 space-y-4">
+      <div role="tablist" aria-label="Citation verification modes" className="flex flex-wrap items-center gap-2 mb-6 border-b border-slate-200 pb-3">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={activeTab === 'references'}
+          onClick={() => setActiveTab('references')}
+          className={`inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold rounded-lg border transition-colors ${
+            activeTab === 'references'
+              ? 'bg-slate-900 text-white border-slate-900'
+              : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50'
+          }`}
+        >
+          <BookCheck className="w-3.5 h-3.5" aria-hidden="true" />
+          <span>Reference List &amp; Claim Audit</span>
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={activeTab === 'bibtex'}
+          onClick={() => setActiveTab('bibtex')}
+          className={`inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold rounded-lg border transition-colors ${
+            activeTab === 'bibtex'
+              ? 'bg-slate-900 text-white border-slate-900'
+              : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50'
+          }`}
+        >
+          <FileCode2 className="w-3.5 h-3.5" aria-hidden="true" />
+          <span>BibTeX Verifier (Crossref)</span>
+        </button>
+      </div>
+
+      {activeTab === 'bibtex' ? (
+        <BibtexVerificationPanel />
+      ) : (
+        <>
+          <form onSubmit={handleVerify} className="bg-white border border-slate-200 rounded-xl p-6 mb-8 space-y-4">
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div>
             <label htmlFor="cit-doc" className="block text-xs font-medium text-slate-700 mb-1">
@@ -273,13 +417,141 @@ export function CitationIntelligencePage() {
             </div>
           )}
 
+          {/* Dedicated BibTeX Reference Exporter */}
+          <section
+            aria-label="BibTeX Reference Exporter"
+            className="bg-white border border-slate-200 rounded-xl p-6 space-y-4"
+          >
+            <div className="flex flex-wrap items-start justify-between gap-4">
+              <div>
+                <div className="flex items-center gap-2">
+                  <FileCode2 className="w-4 h-4 text-blue-800" aria-hidden="true" />
+                  <h2 className="font-display text-sm font-semibold text-slate-900">BibTeX Reference Exporter</h2>
+                </div>
+                <p className="text-xs text-slate-600 mt-1">
+                  Verified entries export by default without inventing missing fields. Enable the toggle below to annotate and include unverified or incomplete items.
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleCopyBibtex}
+                  disabled={!bibtexResult || bibtexResult.includedCount === 0}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-700 bg-slate-50 border border-slate-300 rounded-lg hover:bg-slate-100 disabled:opacity-50"
+                >
+                  {bibCopied ? <Check className="w-3.5 h-3.5 text-emerald-700" /> : <Copy className="w-3.5 h-3.5" />}
+                  <span>{bibCopied ? 'Copied .bib' : 'Copy BibTeX'}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleDownloadBibtex}
+                  disabled={!bibtexResult || bibtexResult.includedCount === 0}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-slate-900 rounded-lg hover:bg-slate-800 disabled:opacity-50"
+                >
+                  <Download className="w-3.5 h-3.5" aria-hidden="true" />
+                  <span>Download .bib</span>
+                </button>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-3 pt-3 border-t border-slate-100 text-xs">
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={selectVerifiedOnly}
+                  className="px-2.5 py-1 border border-slate-300 rounded-md text-slate-700 hover:bg-slate-50"
+                >
+                  Select Verified ({result.audit.summary.verifiedCount})
+                </button>
+                <button
+                  type="button"
+                  onClick={selectAllCitations}
+                  className="px-2.5 py-1 border border-slate-300 rounded-md text-slate-700 hover:bg-slate-50"
+                >
+                  Select All ({result.audit.citations.length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSelectedIds([])}
+                  className="px-2.5 py-1 border border-slate-300 rounded-md text-slate-600 hover:bg-slate-50"
+                >
+                  Clear
+                </button>
+              </div>
+
+              <label className="inline-flex items-center gap-2 font-medium text-slate-700 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={includeUnverified}
+                  onChange={(e) => setIncludeUnverified(e.target.checked)}
+                  className="rounded border-slate-300 text-blue-800"
+                />
+                <span>Include unverified & incomplete entries (annotated)</span>
+              </label>
+            </div>
+
+            {bibError && (
+              <div role="alert" className="p-3 rounded-lg border border-red-200 bg-red-50 text-xs text-red-800">
+                {bibError}
+              </div>
+            )}
+
+            {bibtexResult && (
+              <div className="space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-600">
+                  <div className="font-mono tabular-nums">
+                    Included: <strong className="text-slate-900">{bibtexResult.includedCount}</strong> · Skipped:{' '}
+                    <strong className="text-slate-900">{bibtexResult.skippedCount}</strong>
+                  </div>
+                  <div className="font-mono">
+                    {bibLoading
+                      ? 'Generating validated BibTeX...'
+                      : bibtexResult.validation.valid
+                      ? `Syntax check passed (${bibtexResult.validation.entryCount} entries)`
+                      : `Syntax warnings: ${bibtexResult.validation.errors.join('; ')}`}
+                  </div>
+                </div>
+
+                {bibtexResult.skippedEntries.length > 0 && (
+                  <div className="p-3 rounded-lg border border-amber-200 bg-amber-50 text-xs text-amber-900 space-y-1">
+                    <div className="font-semibold">
+                      Skipped {bibtexResult.skippedEntries.length} unverified/incomplete reference(s) in verified-only mode:
+                    </div>
+                    <ul className="list-disc pl-4 space-y-0.5">
+                      {bibtexResult.skippedEntries.slice(0, 4).map((s, idx) => (
+                        <li key={idx}>
+                          <span className="font-mono">{s.rawReference}</span> — {s.reason}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                <pre className="p-4 bg-slate-950 text-slate-100 rounded-lg text-xs font-mono overflow-x-auto max-h-72 leading-relaxed">
+                  {bibtexResult.bibtex}
+                </pre>
+              </div>
+            )}
+          </section>
+
           <div className="bg-white border border-slate-200 rounded-xl divide-y divide-slate-200">
             {result.audit.citations.map((c) => {
               const formatted = formatStyle === 'IEEE' ? c.formattedIEEE : c.formattedAPA;
+              const isSelected = selectedIds.includes(c.id);
               return (
                 <div key={c.id} className="p-6 space-y-2.5">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div className="flex flex-wrap items-center gap-3">
+                      <label className="inline-flex items-center gap-1.5 text-xs text-slate-600 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={isSelected}
+                          onChange={() => toggleCitationSelection(c.id)}
+                          aria-label={`Select citation ${c.rawReference.slice(0, 40)} for BibTeX`}
+                          className="rounded border-slate-300 text-blue-800"
+                        />
+                        <span className="sr-only">Include in BibTeX</span>
+                      </label>
                       <StatusLabel status={c.bibliographicStatus || c.status} />
                       {c.claimSupportStatus && c.claimSupportStatus !== 'Verification unavailable' && (
                         <StatusLabel status={c.claimSupportStatus} />
@@ -334,6 +606,8 @@ export function CitationIntelligencePage() {
             })}
           </div>
         </div>
+      )}
+        </>
       )}
     </WorkspaceLayout>
   );

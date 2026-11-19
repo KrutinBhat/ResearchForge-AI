@@ -179,6 +179,8 @@ def evaluate_research_quality(text: str, title: str = "Manuscript") -> Dict[str,
     overall_score = round(sum(d["score"] for d in dimensions) / len(dimensions), 1)
     weak_items = [d for d in dimensions if d["status"] != "Strong"]
     recommendations = [f"[{d['dimension']} · {d['location']}] {d['recommendation']}" for d in weak_items]
+    weaknesses = [f"{d['dimension']}: {d['evidence']}" for d in weak_items]
+    missing_elements = [d["dimension"] for d in weak_items]
 
     return {
         "title": title,
@@ -186,7 +188,13 @@ def evaluate_research_quality(text: str, title: str = "Manuscript") -> Dict[str,
         "overallScore": overall_score,
         "criteriaCount": len(dimensions),
         "dimensions": dimensions,
+        "weaknesses": weaknesses,
+        "missingElements": missing_elements,
         "recommendations": recommendations,
+        "methodologyNote": (
+            "Heuristic structural and reproducibility rubric across 13 criteria anchored to manuscript sections; "
+            "flags missing documentation conservatively without inventing external claims."
+        ),
     }
 
 
@@ -207,9 +215,23 @@ async def evaluate_research_quality_with_llm(text: str, title: str = "Manuscript
             f"Title: {title}\nExcerpt:\n{text[:5000]}"
         )
         resp = client.models.generate_content(model="gemini-4-hydrogen", contents=prompt)
-        m = re.search(r"\{[\s\S]*\}", (resp.text or "").strip())
+        raw_text = (resp.text or "").strip()
+        m = re.search(r"\{[\s\S]*\}", raw_text)
         if m:
-            base["llmCritique"] = json.loads(m.group(0))
+            parsed = json.loads(m.group(0))
+            strengths = parsed.get("strengths") or []
+            weak_list = parsed.get("criticalWeaknesses") or []
+            lines = []
+            if strengths:
+                lines.append("Strengths: " + "; ".join(str(s) for s in strengths))
+            for item in weak_list:
+                if isinstance(item, dict):
+                    lines.append(
+                        f"- [{item.get('location', 'Section')}] {item.get('issue', '')}: "
+                        f"{item.get('why', '')} Improvement: {item.get('improvement', '')}"
+                    )
+            base["llmCritique"] = "\n".join(lines).strip() or raw_text
+            base["llmCritiqueStructured"] = parsed
             base["critiqueProvider"] = "gemini-4-hydrogen"
     except Exception:
         pass
