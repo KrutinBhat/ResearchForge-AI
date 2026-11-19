@@ -497,6 +497,7 @@ async def evaluate_quality(
         text,
         title=title,
         gemini_api_key=settings.GEMINI_API_KEY if payload.includeLlmCritique else "",
+        gemini_model=settings.GEMINI_MODEL,
     )
 
     record = QualityEvaluation(

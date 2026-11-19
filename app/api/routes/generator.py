@@ -36,6 +36,7 @@ async def generate_paper(
         project_analysis=project_analysis,
         engine_mode=payload.engineMode,
         gemini_api_key=settings.GEMINI_API_KEY,
+        gemini_model=settings.GEMINI_MODEL,
         citation_style=effective_style,
         ollama_base_url=settings.OLLAMA_BASE_URL,
         ollama_model=settings.OLLAMA_MODEL,

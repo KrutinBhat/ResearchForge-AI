@@ -247,12 +247,18 @@ def verify_exported_pdf_bytes(pdf_bytes: bytes) -> Dict[str, Any]:
     """Programmatically verify PDF header, EOF trailer, page count (>0), and extractable text."""
     if not pdf_bytes or not pdf_bytes.startswith(b"%PDF-"):
         raise ValueError("Invalid PDF output header.")
+    if b"%%EOF" not in pdf_bytes[-2048:]:
+        raise ValueError("Truncated PDF: missing %%EOF marker.")
     try:
         import fitz
 
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         try:
-            pages = len(doc)
+            # PyMuPDF can accept hand-built PDFs whose page tree Count is stale.
+            # Count explicit page objects as well; the negative lookahead excludes
+            # the page-tree container object (`/Type /Pages`).
+            object_page_count = len(re.findall(rb"/Type\s*/Page(?![s\w])", pdf_bytes))
+            pages = max(len(doc), object_page_count)
             if pages <= 0:
                 raise ValueError("Invalid PDF: contains 0 pages.")
             extracted = "\n".join(p.get_text("text") for p in doc).strip()

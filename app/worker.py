@@ -195,6 +195,7 @@ def execute_refinement_job_sync(
                 preserve_terms=eff_preserve,
                 engine_mode=eff_engine,
                 gemini_api_key=settings.GEMINI_API_KEY,
+                gemini_model=settings.GEMINI_MODEL,
                 ollama_base_url=settings.OLLAMA_BASE_URL,
                 ollama_model=settings.OLLAMA_MODEL,
                 paragraph_index=eff_para_idx if not eff_para_text else None,

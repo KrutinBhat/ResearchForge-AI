@@ -95,15 +95,23 @@ def get_owned_or_404(
 
 async def read_validated_upload(file: UploadFile) -> bytes:
     settings = get_settings()
-    data = await file.read()
-    if not data:
+    chunks: list[bytes] = []
+    size = 0
+    try:
+        while chunk := await file.read(min(1024 * 1024, settings.MAX_UPLOAD_BYTES + 1 - size)):
+            size += len(chunk)
+            if size > settings.MAX_UPLOAD_BYTES:
+                raise HTTPException(
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    detail=f"File exceeds {settings.MAX_UPLOAD_BYTES // (1024 * 1024)} MB limit.",
+                )
+            chunks.append(chunk)
+    finally:
+        await file.close()
+
+    if size == 0:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Uploaded file is empty.")
-    if len(data) > settings.MAX_UPLOAD_BYTES:
-        raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail=f"File exceeds {settings.MAX_UPLOAD_BYTES // (1024 * 1024)} MB limit.",
-        )
-    return data
+    return b"".join(chunks)
 
 
 def record_activity(db: Session, user_id: str, module: str, action: str, entity_title: str, status_label: str = "Completed") -> None:

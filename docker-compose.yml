@@ -6,7 +6,7 @@ services:
       POSTGRES_PASSWORD: researchforge_dev_password
       POSTGRES_DB: researchforge
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -18,22 +18,37 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6380:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
       retries: 5
 
+  migrate:
+    image: researchforge-ai-api
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      ENVIRONMENT: development
+      SQL_HOST: postgres
+      SQL_USER: researchforge
+      SQL_PASSWORD: researchforge_dev_password
+      SQL_DB_NAME: researchforge
+
   api:
     build: .
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8001:8000"
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/ready', timeout=3)\""]
       interval: 15s
@@ -45,7 +60,7 @@ services:
       FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID:-}
       FIREBASE_SERVICE_ACCOUNT_JSON: ${FIREBASE_SERVICE_ACCOUNT_JSON:-}
       FIREBASE_CHECK_REVOKED: ${FIREBASE_CHECK_REVOKED:-false}
-      CORS_ORIGINS: http://localhost:3000,http://127.0.0.1:3000
+      CORS_ORIGINS: http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000,http://127.0.0.1:3000
       SQL_HOST: postgres
       SQL_USER: researchforge
       SQL_PASSWORD: researchforge_dev_password
@@ -58,13 +73,15 @@ services:
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
 
   worker:
-    build: .
+    image: researchforge-ai-api
     command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=2
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import sys; from app.worker import check_redis_health; sys.exit(0 if check_redis_health() else 1)\""]
       interval: 20s

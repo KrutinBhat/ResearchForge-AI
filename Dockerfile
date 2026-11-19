@@ -7,13 +7,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     HOME=/tmp
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
     tesseract-ocr \
     tesseract-ocr-eng \
     poppler-utils \
     libglib2.0-0 \
     libgomp1 \
-    libpq-dev \
     && tesseract --version \
     && rm -rf /var/lib/apt/lists/* \
     && addgroup --system rfuser \
@@ -21,13 +19,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /srv/researchforge
 
-COPY requirements.txt ./
-RUN pip install --upgrade pip && pip install -r requirements.txt
+COPY requirements.txt requirements-docker.txt ./
+RUN pip install --upgrade pip && pip install --no-cache-dir -r requirements-docker.txt
 
 COPY --chown=rfuser:rfuser app ./app
 COPY --chown=rfuser:rfuser alembic ./alembic
 COPY --chown=rfuser:rfuser alembic.ini ./
-COPY --chown=rfuser:rfuser tests ./tests
 COPY --chown=rfuser:rfuser firebase-applet-config.json ./
 
 RUN mkdir -p /tmp/researchforge && chown -R rfuser:rfuser /tmp/researchforge /srv/researchforge
@@ -39,4 +36,4 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=25s --retries=3 \
     CMD python -c "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.getenv('PORT', '8000') + '/api/ready', timeout=3)" || exit 1
 
-CMD ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]

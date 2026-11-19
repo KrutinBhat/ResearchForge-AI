@@ -4,6 +4,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import List
 from urllib.parse import quote_plus
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -22,6 +23,12 @@ def _resolve_database_url(environment: str | None = None) -> str:
 
     explicit_dsn = os.getenv("POSTGRES_DSN", "").strip() or os.getenv("DATABASE_URL", "").strip()
     if explicit_dsn:
+        # Render and most managed Postgres providers expose postgresql:// URLs.
+        # This project installs psycopg v3, so select its SQLAlchemy dialect explicitly.
+        if explicit_dsn.startswith("postgres://"):
+            return "postgresql+psycopg://" + explicit_dsn[len("postgres://"):]
+        if explicit_dsn.startswith("postgresql://"):
+            return "postgresql+psycopg://" + explicit_dsn[len("postgresql://"):]
         return explicit_dsn
 
     if env_name == "production":
@@ -80,19 +87,37 @@ class Settings(BaseSettings):
 
     # AI / Model Providers & Scholarly Caching
     GEMINI_API_KEY: str = ""
-    GEMINI_MODEL: str = "gemini-4-hydrogen"
+    GEMINI_MODEL: str = "gemini-3.6-flash"
     OLLAMA_BASE_URL: str = "http://localhost:11434"
     OLLAMA_MODEL: str = "llama3.1"
     EMBEDDING_MODEL_NAME: str = "sentence-transformers/all-MiniLM-L6-v2"
     CONTACT_MAILTO: str = "researchforge@example.edu"
     SCHOLARLY_CACHE_TTL_SECONDS: int = 3600
 
-    CORS_ORIGINS: List[str] = ["http://localhost:3000", "http://127.0.0.1:3000"]
+    CORS_ORIGINS: List[str] = [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ]
+
+    @field_validator("CORS_ORIGINS", mode="before")
+    @classmethod
+    def parse_cors_origins(cls, value):
+        if isinstance(value, str):
+            cleaned = value.strip()
+            if not cleaned:
+                return []
+            if cleaned.startswith("["):
+                return json.loads(cleaned)
+            return [origin.strip() for origin in cleaned.split(",") if origin.strip()]
+        return value
 
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
+        enable_decoding=False,
     )
 
     def effective_jwt_secret(self) -> str:

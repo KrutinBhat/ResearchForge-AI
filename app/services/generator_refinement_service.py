@@ -233,6 +233,7 @@ async def generate_grounded_ieee_paper(
     project_analysis: Optional[Dict[str, Any]] = None,
     engine_mode: str = "gemini",
     gemini_api_key: str = "",
+    gemini_model: str = "gemini-3.6-flash",
     citation_style: str = "IEEE",
     ollama_base_url: str = "",
     ollama_model: str = "llama3.1",
@@ -255,7 +256,7 @@ async def generate_grounded_ieee_paper(
             from google import genai
 
             client = genai.Client(api_key=api_key)
-            resp = client.models.generate_content(model="gemini-4-hydrogen", contents=prompt)
+            resp = client.models.generate_content(model=gemini_model, contents=prompt)
             json_match = re.search(r"\{[\s\S]*\}", (resp.text or "").strip())
             if json_match:
                 parsed = json.loads(json_match.group(0))
@@ -263,7 +264,7 @@ async def generate_grounded_ieee_paper(
                     return {
                         "title": title,
                         "format": citation_style.upper(),
-                        "engineUsed": "gemini-4-hydrogen",
+                        "engineUsed": gemini_model,
                         "missingInputs": parsed.get("missingInputs", []),
                         "sections": [{**s, "approved": False} for s in parsed["sections"]],
                     }
@@ -306,6 +307,7 @@ async def refine_sections_academic(
     preserve_terms: str = "",
     engine_mode: str = "gemini",
     gemini_api_key: str = "",
+    gemini_model: str = "gemini-3.6-flash",
     ollama_base_url: str = "",
     ollama_model: str = "llama3.1",
     paragraph_index: Optional[int] = None,
@@ -335,11 +337,11 @@ async def refine_sections_academic(
                 from google import genai
 
                 client = genai.Client(api_key=api_key)
-                resp = client.models.generate_content(model="gemini-4-hydrogen", contents=prompt)
+                resp = client.models.generate_content(model=gemini_model, contents=prompt)
                 candidate = (resp.text or "").strip()
                 if candidate:
                     refined_part = candidate
-                    engine_used = "gemini-4-hydrogen"
+                    engine_used = gemini_model
             except Exception:
                 pass
         elif ollama_base_url and engine_mode != "local" and target_text.strip():

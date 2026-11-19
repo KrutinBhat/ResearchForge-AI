@@ -2,6 +2,30 @@ import { auth } from './firebase.ts';
 
 let memoryToken: string | null = null;
 const SESSION_KEY = 'rf_session_jwt';
+const REQUEST_TIMEOUT_MS = 60_000;
+const UPLOAD_TIMEOUT_MS = 180_000;
+
+function withRequestTimeout(options: RequestInit, timeoutMs = REQUEST_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(new DOMException('Request timed out.', 'TimeoutError')), timeoutMs);
+  const abortFromCaller = () => controller.abort(options.signal?.reason);
+  if (options.signal?.aborted) abortFromCaller();
+  else options.signal?.addEventListener('abort', abortFromCaller, { once: true });
+  return {
+    request: { ...options, signal: controller.signal },
+    cleanup: () => {
+      window.clearTimeout(timeout);
+      options.signal?.removeEventListener('abort', abortFromCaller);
+    },
+  };
+}
+
+function readApiError(data: any, fallback: string): string {
+  const detail = data?.error ?? data?.detail;
+  if (typeof detail === 'string') return detail;
+  if (Array.isArray(detail)) return detail.map((item) => item?.msg || String(item)).join('; ');
+  return fallback;
+}
 
 export async function getAuthToken(forceRefresh = false): Promise<string | null> {
   if (auth.currentUser) {
@@ -43,7 +67,12 @@ async function performFetch(path: string, options: RequestInit, token: string | 
   if (!(options.body instanceof FormData) && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json');
   }
-  return fetch(path, { ...options, headers });
+  const timed = withRequestTimeout({ ...options, headers });
+  try {
+    return await fetch(path, timed.request);
+  } finally {
+    timed.cleanup();
+  }
 }
 
 export async function apiFetch<T = any>(path: string, options: RequestInit = {}): Promise<T> {
@@ -62,13 +91,13 @@ export async function apiFetch<T = any>(path: string, options: RequestInit = {})
     let message = `Request failed (${res.status})`;
     try {
       const errData = await res.json();
-      if (errData?.error) message = errData.error;
-      else if (errData?.detail) message = errData.detail;
+      message = readApiError(errData, message);
     } catch {
       // ignore non-json error body
     }
     throw new Error(message);
   }
+  if (res.status === 204) return undefined as T;
   return res.json() as Promise<T>;
 }
 
@@ -81,6 +110,7 @@ export async function apiUploadWithProgress<T = any>(
     new Promise<{ status: number; bodyText: string }>((resolve, reject) => {
       const xhr = new XMLHttpRequest();
       xhr.open('POST', path);
+      xhr.timeout = UPLOAD_TIMEOUT_MS;
       if (token) {
         xhr.setRequestHeader('Authorization', `Bearer ${token}`);
       }
@@ -96,6 +126,8 @@ export async function apiUploadWithProgress<T = any>(
         resolve({ status: xhr.status, bodyText: xhr.responseText || '' });
       };
       xhr.onerror = () => reject(new Error('Network error while uploading file.'));
+      xhr.ontimeout = () => reject(new Error('Upload timed out. Please try again with a smaller file or a more stable connection.'));
+      xhr.onabort = () => reject(new Error('Upload was cancelled.'));
       xhr.send(formData);
     });
 
@@ -116,7 +148,7 @@ export async function apiUploadWithProgress<T = any>(
   }
 
   if (result.status < 200 || result.status >= 300) {
-    throw new Error(parsed?.error || parsed?.detail || `Upload failed (${result.status})`);
+    throw new Error(readApiError(parsed, `Upload failed (${result.status})`));
   }
   return parsed as T;
 }

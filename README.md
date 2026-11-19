@@ -307,6 +307,7 @@ Install the following before running the application:
 
 - Python 3.11 or a compatible supported version.
 - Node.js and npm.
+- Bun (the checked-in `bun.lock` is the frontend dependency lockfile).
 - PostgreSQL.
 - Git.
 - Tesseract OCR for OCR-dependent functionality.
@@ -316,85 +317,60 @@ Step 1: Clone the Repository
 git clone <YOUR_GITHUB_REPOSITORY_URL>
 cd ResearchForge-AI
 
-Step 2: Backend Setup
-
-cd backend
-
-Create a virtual environment:
-
-python -m venv venv
-
-Activate it.
+Step 2: Create a virtual environment at the repository root and install Python dependencies.
 
 Windows PowerShell:
 
-.\venv\Scripts\Activate.ps1
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+```
 
 Linux / macOS:
 
-source venv/bin/activate
+```sh
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+```
 
-Install dependencies:
+Step 3: Configure the environment.
 
-pip install -r requirements.txt
+Copy `.env.example` to `.env`. Set `FASTAPI_URL=http://127.0.0.1:8001` for the Docker Compose API proxy (use port `8000` when running FastAPI directly on Windows). Configure `DATABASE_URL` or `SQL_HOST`, `SQL_USER`, `SQL_PASSWORD`, and `SQL_DB_NAME`; add valid Firebase and Gemini credentials when those integrations are used. Never commit API keys, database passwords, or other secrets.
 
-Step 3: Environment Configuration
+Step 4: Start the complete backend stack with Docker Compose. The stack provisions PostgreSQL with pgvector, Redis, runs Alembic migrations once, then starts FastAPI and the Celery worker. Database and Redis ports bind to localhost only:
 
-Create a ".env" file based on ".env.example".
+```powershell
+docker compose up --build -d
+docker compose ps
+docker compose logs -f api worker
+```
 
-Example:
+The Compose API is available at `http://127.0.0.1:8001`; PostgreSQL and Redis are published locally on ports `5433` and `6380`. API, worker, and migration processes share one application image. The PostgreSQL volume persists between restarts. Stop the stack without deleting its database with:
 
-DATABASE_URL=postgresql://username:password@localhost:5432/researchforge
+```powershell
+docker compose down
+```
 
-GEMINI_API_KEY=your_gemini_api_key
+For a manually managed PostgreSQL database, configure `DATABASE_URL` or the `SQL_HOST`, `SQL_USER`, `SQL_PASSWORD`, and `SQL_DB_NAME` values, ensure pgvector is available, then run `python -m alembic upgrade head` before starting the API.
 
-SECRET_KEY=your_application_secret
+Step 5: To run FastAPI directly on Windows, start PostgreSQL and Redis separately, run migrations, then start the backend:
 
-ENVIRONMENT=development
-
-Use the actual environment variable names defined by the project.
-
-Never commit API keys, database passwords, or other secrets to GitHub.
-
-Step 4: Database Setup
-
-Create a PostgreSQL database named:
-
-researchforge
-
-Configure the database connection in the backend environment.
-
-Apply migrations if Alembic is configured:
-
-alembic upgrade head
-
-Ensure pgvector is installed when vector database functionality is enabled.
-
-Step 5: Start the Backend
-
+```powershell
 uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+```
 
-Backend:
+API docs are available at `http://127.0.0.1:8000/docs` in development.
 
-"http://127.0.0.1:8000"
+Step 6: Install frontend packages and start Vite from the repository root in another terminal:
 
-API Documentation:
+```powershell
+bun install --frozen-lockfile
+bun run dev
+```
 
-"http://127.0.0.1:8000/docs"
-
-Alternative Documentation:
-
-"http://127.0.0.1:8000/redoc"
-
-Step 6: Frontend Setup
-
-Open another terminal:
-
-cd frontend
-npm install
-npm run dev
-
-Open the local URL provided by Vite.
+The Vite development server proxies `/api/*` requests to the FastAPI URL configured by `FASTAPI_URL` (default `http://127.0.0.1:8000`). The optional Express adapter remains available with `npm run dev:adapter`.
 
 Step 7: Verify the Application
 
@@ -593,7 +569,7 @@ Celery has been introduced, but some document-processing operations still execut
 
 7. Containerization
 
-Deployment configuration requires further validation. The audited deployment references include a missing Dockerfile, so complete Docker deployment should not be assumed ready.
+The repository includes a non-root Docker image, a restricted build context, health checks, and a Compose stack for PostgreSQL/pgvector, Redis, migrations, FastAPI, and Celery. Local PostgreSQL and Redis started healthy, the migration container exited successfully, and the API readiness endpoint returned healthy database, Redis, and OCR checks. The worker startup revealed a Redis client incompatibility; `redis-py` is now pinned to 6.1.0, but Docker Desktop did not complete exporting the corrected image during this audit, so the rebuilt worker has not yet been runtime-verified. A successful local health check does not verify a production deployment.
 
 8. End-to-End Validation
 

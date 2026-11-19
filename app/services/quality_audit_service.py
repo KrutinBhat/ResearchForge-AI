@@ -198,7 +198,12 @@ def evaluate_research_quality(text: str, title: str = "Manuscript") -> Dict[str,
     }
 
 
-async def evaluate_research_quality_with_llm(text: str, title: str = "Manuscript", gemini_api_key: str = "") -> Dict[str, Any]:
+async def evaluate_research_quality_with_llm(
+    text: str,
+    title: str = "Manuscript",
+    gemini_api_key: str = "",
+    gemini_model: str = "gemini-3.6-flash",
+) -> Dict[str, Any]:
     base = evaluate_research_quality(text, title=title)
     api_key = gemini_api_key or os.getenv("GEMINI_API_KEY", "")
     if not api_key or len(text.strip()) < 100:
@@ -214,7 +219,7 @@ async def evaluate_research_quality_with_llm(text: str, title: str = "Manuscript
             "strengths (list[str]), criticalWeaknesses (list[{issue, why, location, improvement}]).\n\n"
             f"Title: {title}\nExcerpt:\n{text[:5000]}"
         )
-        resp = client.models.generate_content(model="gemini-4-hydrogen", contents=prompt)
+        resp = client.models.generate_content(model=gemini_model, contents=prompt)
         raw_text = (resp.text or "").strip()
         m = re.search(r"\{[\s\S]*\}", raw_text)
         if m:
@@ -232,7 +237,7 @@ async def evaluate_research_quality_with_llm(text: str, title: str = "Manuscript
                     )
             base["llmCritique"] = "\n".join(lines).strip() or raw_text
             base["llmCritiqueStructured"] = parsed
-            base["critiqueProvider"] = "gemini-4-hydrogen"
+            base["critiqueProvider"] = gemini_model
     except Exception:
         pass
     return base

@@ -9,6 +9,13 @@ from unittest.mock import MagicMock, patch
 
 import base64
 import json
+import tempfile
+from pathlib import Path
+from unittest import IsolatedAsyncioTestCase
+from unittest.mock import AsyncMock
+from fastapi import HTTPException
+from sqlalchemy import create_engine, inspect
+from app.api import deps
 from app.core.security import (
     is_safe_archive_path,
     parse_service_account_source,
@@ -251,11 +258,56 @@ class TestAlembicMigrationChain(unittest.TestCase):
     def test_alembic_sqlite_upgrade_to_head(self):
         from alembic import command
         from alembic.config import Config
+        from app.core import config as app_config
 
-        cfg = Config("alembic.ini")
-        os.environ["ENVIRONMENT"] = "development"
-        command.upgrade(cfg, "head")
-        command.downgrade(cfg, "base")
+        with tempfile.TemporaryDirectory(prefix="researchforge-migration-") as temp_dir:
+            database_path = Path(temp_dir) / "migration.db"
+            database_url = f"sqlite:///{database_path.as_posix()}"
+            cfg = Config("alembic.ini")
+            with patch.dict(os.environ, {"ENVIRONMENT": "development", "DATABASE_URL": database_url}):
+                app_config.get_settings.cache_clear()
+                try:
+                    command.upgrade(cfg, "head")
+                    engine = create_engine(database_url)
+                    try:
+                        tables = set(inspect(engine).get_table_names())
+                        self.assertTrue({"users", "documents", "alembic_version"}.issubset(tables))
+                        command.downgrade(cfg, "base")
+                        self.assertEqual(set(inspect(engine).get_table_names()), {"alembic_version"})
+                    finally:
+                        engine.dispose()
+                finally:
+                    app_config.get_settings.cache_clear()
+
+
+class TestBoundedUploadRead(IsolatedAsyncioTestCase):
+    async def test_upload_is_read_in_chunks_and_closed(self):
+        class Settings:
+            MAX_UPLOAD_BYTES = 8
+
+        upload = types.SimpleNamespace(
+            read=AsyncMock(side_effect=[b"abcd", b"efgh", b""]),
+            close=AsyncMock(),
+        )
+        with patch.object(deps, "get_settings", return_value=Settings()):
+            self.assertEqual(await deps.read_validated_upload(upload), b"abcdefgh")
+        self.assertEqual(upload.read.await_count, 3)
+        upload.close.assert_awaited_once()
+
+    async def test_oversized_upload_stops_reading_and_closes(self):
+        class Settings:
+            MAX_UPLOAD_BYTES = 4
+
+        upload = types.SimpleNamespace(
+            read=AsyncMock(side_effect=[b"abcd", b"e", b"must not be read"]),
+            close=AsyncMock(),
+        )
+        with patch.object(deps, "get_settings", return_value=Settings()):
+            with self.assertRaises(HTTPException) as raised:
+                await deps.read_validated_upload(upload)
+        self.assertEqual(raised.exception.status_code, 413)
+        self.assertEqual(upload.read.await_count, 2)
+        upload.close.assert_awaited_once()
 
 
 if __name__ == "__main__":

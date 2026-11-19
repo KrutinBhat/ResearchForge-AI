@@ -5,6 +5,7 @@ services:
     dockerfilePath: ./Dockerfile
     plan: starter
     region: singapore
+    preDeployCommand: alembic upgrade head
     healthCheckPath: /api/ready
     envVars:
       - key: ENVIRONMENT
@@ -27,27 +28,23 @@ services:
         generateValue: true
       - key: GEMINI_API_KEY
         sync: false
-      - key: SQL_HOST
-        sync: false
-      - key: SQL_USER
-        sync: false
-      - key: SQL_PASSWORD
-        sync: false
-      - key: SQL_DB_NAME
-        sync: false
+      - key: DATABASE_URL
+        fromDatabase:
+          name: researchforge-db
+          property: connectionString
       - key: REDIS_URL
         fromService:
-          type: redis
+          type: keyvalue
           name: researchforge-redis
           property: connectionString
       - key: CELERY_BROKER_URL
         fromService:
-          type: redis
+          type: keyvalue
           name: researchforge-redis
           property: connectionString
       - key: CELERY_RESULT_BACKEND
         fromService:
-          type: redis
+          type: keyvalue
           name: researchforge-redis
           property: connectionString
 
@@ -73,32 +70,37 @@ services:
         sync: false
       - key: GEMINI_API_KEY
         sync: false
-      - key: SQL_HOST
-        sync: false
-      - key: SQL_USER
-        sync: false
-      - key: SQL_PASSWORD
-        sync: false
-      - key: SQL_DB_NAME
-        sync: false
+      - key: DATABASE_URL
+        fromDatabase:
+          name: researchforge-db
+          property: connectionString
       - key: REDIS_URL
         fromService:
-          type: redis
+          type: keyvalue
           name: researchforge-redis
           property: connectionString
       - key: CELERY_BROKER_URL
         fromService:
-          type: redis
+          type: keyvalue
           name: researchforge-redis
           property: connectionString
       - key: CELERY_RESULT_BACKEND
         fromService:
-          type: redis
+          type: keyvalue
           name: researchforge-redis
           property: connectionString
 
-  - type: redis
+  - type: keyvalue
     name: researchforge-redis
     region: singapore
-    plan: free
+    plan: 256mb
+    persistenceMode: journal-snapshot
     ipAllowList: []
+
+databases:
+  - name: researchforge-db
+    region: singapore
+    plan: basic-256mb
+    postgresMajorVersion: "16"
+    databaseName: researchforge
+    user: researchforge
